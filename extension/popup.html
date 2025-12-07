@@ -42,6 +42,19 @@
         <div class="form-group">
           <label for="webhookUrl">URL du Webhook n8n</label>
           <input type="url" id="webhookUrl" placeholder="https://votre-n8n.com/webhook/...">
+        </div>
+
+        <div class="form-group">
+          <label for="authUsername">Utilisateur (Basic Auth)</label>
+          <input type="text" id="authUsername" placeholder="username">
+        </div>
+
+        <div class="form-group">
+          <label for="authPassword">Mot de passe (Basic Auth)</label>
+          <input type="password" id="authPassword" placeholder="password">
+        </div>
+
+        <div class="form-group">
           <button id="testBtn" class="test-btn">Tester la connexion</button>
           <div id="testResult" class="test-result"></div>
         </div>

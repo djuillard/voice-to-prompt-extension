@@ -40,7 +40,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ isRecording });
       break;
     case 'test-connection':
-      testConnection(message.url).then(sendResponse);
+      testConnection(message.url, message.username, message.password).then(sendResponse);
       return true; // Indique une réponse asynchrone
     case 'audio-data':
       handleAudioData(message.data, sender.tab.id);
@@ -86,12 +86,26 @@ async function toggleRecording() {
   }
 }
 
+// Construire les headers avec Basic Auth si configuré
+function buildHeaders(username, password) {
+  const headers = {
+    'Content-Type': 'application/json'
+  };
+
+  if (username && password) {
+    const credentials = btoa(`${username}:${password}`);
+    headers['Authorization'] = `Basic ${credentials}`;
+  }
+
+  return headers;
+}
+
 // Traiter l'audio enregistré
 async function processAudio(audioBase64, tabId) {
   try {
     updateBadge('processing');
 
-    const config = await chrome.storage.sync.get(['webhookUrl']);
+    const config = await chrome.storage.sync.get(['webhookUrl', 'authUsername', 'authPassword']);
 
     if (!config.webhookUrl) {
       throw new Error('URL du webhook non configurée');
@@ -100,9 +114,7 @@ async function processAudio(audioBase64, tabId) {
     // Envoyer l'audio au webhook n8n
     const response = await fetch(config.webhookUrl, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
+      headers: buildHeaders(config.authUsername, config.authPassword),
       body: JSON.stringify({
         audio: audioBase64,
         timestamp: new Date().toISOString()
@@ -145,13 +157,11 @@ async function processAudio(audioBase64, tabId) {
 }
 
 // Tester la connexion au webhook
-async function testConnection(url) {
+async function testConnection(url, username, password) {
   try {
     const response = await fetch(url, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
+      headers: buildHeaders(username, password),
       body: JSON.stringify({
         test: true,
         timestamp: new Date().toISOString()
@@ -160,6 +170,8 @@ async function testConnection(url) {
 
     if (response.ok) {
       return { success: true, message: 'Connexion réussie!' };
+    } else if (response.status === 401) {
+      return { success: false, message: 'Erreur 401: Authentification échouée (vérifiez username/password)' };
     } else {
       return { success: false, message: `Erreur HTTP: ${response.status}` };
     }

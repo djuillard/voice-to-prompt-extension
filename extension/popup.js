@@ -4,6 +4,8 @@
 document.addEventListener('DOMContentLoaded', () => {
   // Éléments DOM
   const webhookUrlInput = document.getElementById('webhookUrl');
+  const authUsernameInput = document.getElementById('authUsername');
+  const authPasswordInput = document.getElementById('authPassword');
   const hotkeyInput = document.getElementById('hotkey');
   const testBtn = document.getElementById('testBtn');
   const testResult = document.getElementById('testResult');
@@ -25,9 +27,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Charger la configuration depuis le storage
   function loadConfig() {
-    chrome.storage.sync.get(['webhookUrl', 'hotkey'], (result) => {
+    chrome.storage.sync.get(['webhookUrl', 'authUsername', 'authPassword', 'hotkey'], (result) => {
       if (result.webhookUrl) {
         webhookUrlInput.value = result.webhookUrl;
+      }
+      if (result.authUsername) {
+        authUsernameInput.value = result.authUsername;
+      }
+      if (result.authPassword) {
+        authPasswordInput.value = result.authPassword;
       }
       if (result.hotkey) {
         hotkeyInput.value = result.hotkey;
@@ -38,6 +46,8 @@ document.addEventListener('DOMContentLoaded', () => {
   // Sauvegarder la configuration
   function saveConfig() {
     const webhookUrl = webhookUrlInput.value.trim();
+    const authUsername = authUsernameInput.value.trim();
+    const authPassword = authPasswordInput.value;
 
     if (!webhookUrl) {
       showTestResult('Veuillez entrer une URL de webhook', false);
@@ -53,7 +63,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     chrome.storage.sync.set({
-      webhookUrl: webhookUrl
+      webhookUrl: webhookUrl,
+      authUsername: authUsername,
+      authPassword: authPassword
     }, () => {
       saveBtn.textContent = 'Sauvegardé!';
       saveBtn.classList.add('saved');
@@ -68,6 +80,8 @@ document.addEventListener('DOMContentLoaded', () => {
   // Tester la connexion au webhook
   async function testConnection() {
     const webhookUrl = webhookUrlInput.value.trim();
+    const authUsername = authUsernameInput.value.trim();
+    const authPassword = authPasswordInput.value;
 
     if (!webhookUrl) {
       showTestResult('Veuillez entrer une URL de webhook', false);
@@ -80,7 +94,9 @@ document.addEventListener('DOMContentLoaded', () => {
     try {
       const response = await chrome.runtime.sendMessage({
         action: 'test-connection',
-        url: webhookUrl
+        url: webhookUrl,
+        username: authUsername,
+        password: authPassword
       });
 
       showTestResult(response.message, response.success);
