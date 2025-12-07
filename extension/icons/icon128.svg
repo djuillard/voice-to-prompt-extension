@@ -1,0 +1,14 @@
+<svg width="128" height="128" viewBox="0 0 128 128" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bgGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#667eea"/>
+      <stop offset="100%" style="stop-color:#764ba2"/>
+    </linearGradient>
+  </defs>
+  <circle cx="64" cy="64" r="60" fill="url(#bgGradient)"/>
+  <path d="M64 32C58.6957 32 53.6086 34.1071 49.8579 37.8579C46.1071 41.6086 44 46.6957 44 52V64C44 69.3043 46.1071 74.3914 49.8579 78.1421C53.6086 81.8929 58.6957 84 64 84C69.3043 84 74.3914 81.8929 78.1421 78.1421C81.8929 74.3914 84 69.3043 84 64V52C84 46.6957 81.8929 41.6086 78.1421 37.8579C74.3914 34.1071 69.3043 32 64 32Z" fill="white"/>
+  <path d="M64 92V104" stroke="white" stroke-width="6" stroke-linecap="round"/>
+  <path d="M48 104H80" stroke="white" stroke-width="6" stroke-linecap="round"/>
+  <path d="M32 64C32 73.5478 35.7928 82.7045 42.5442 89.4558C49.2955 96.2072 58.4522 100 68 100C77.5478 100 86.7045 96.2072 93.4558 89.4558C100.207 82.7045 104 73.5478 104 64" stroke="white" stroke-width="6" stroke-linecap="round"/>
+  <ellipse cx="64" cy="100" rx="16" ry="4" fill="white" opacity="0.3"/>
+</svg>

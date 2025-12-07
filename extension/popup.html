@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Voice to Text - Configuration</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="logo">
+        <svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="16" cy="16" r="15" stroke="#667eea" stroke-width="2"/>
+          <path d="M16 8C14.4087 8 12.8826 8.63214 11.7574 9.75736C10.6321 10.8826 10 12.4087 10 14V16C10 17.5913 10.6321 19.1174 11.7574 20.2426C12.8826 21.3679 14.4087 22 16 22C17.5913 22 19.1174 21.3679 20.2426 20.2426C21.3679 19.1174 22 17.5913 22 16V14C22 12.4087 21.3679 10.8826 20.2426 9.75736C19.1174 8.63214 17.5913 8 16 8Z" fill="#667eea"/>
+          <path d="M16 24V27" stroke="#667eea" stroke-width="2" stroke-linecap="round"/>
+          <path d="M12 27H20" stroke="#667eea" stroke-width="2" stroke-linecap="round"/>
+          <path d="M7 16C7 18.3869 7.94821 20.6761 9.63604 22.364C11.3239 24.0518 13.6131 25 16 25C18.3869 25 20.6761 24.0518 22.364 22.364C24.0518 20.6761 25 18.3869 25 16" stroke="#667eea" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+      </div>
+      <h1>Voice to Text</h1>
+      <p class="subtitle">Transcription vocale via n8n</p>
+    </header>
+
+    <main>
+      <!-- Status -->
+      <section class="status-section">
+        <div id="status" class="status idle">
+          <span class="status-dot"></span>
+          <span class="status-text">Prêt</span>
+        </div>
+        <button id="recordBtn" class="record-btn">
+          <span class="btn-icon">🎤</span>
+          <span class="btn-text">Enregistrer</span>
+        </button>
+      </section>
+
+      <!-- Configuration -->
+      <section class="config-section">
+        <h2>Configuration</h2>
+
+        <div class="form-group">
+          <label for="webhookUrl">URL du Webhook n8n</label>
+          <input type="url" id="webhookUrl" placeholder="https://votre-n8n.com/webhook/...">
+          <button id="testBtn" class="test-btn">Tester la connexion</button>
+          <div id="testResult" class="test-result"></div>
+        </div>
+
+        <div class="form-group">
+          <label for="hotkey">Raccourci clavier</label>
+          <input type="text" id="hotkey" readonly value="Ctrl+Shift+V">
+          <p class="hint">Modifiable dans chrome://extensions/shortcuts</p>
+        </div>
+      </section>
+
+      <!-- Actions -->
+      <section class="actions-section">
+        <button id="saveBtn" class="save-btn">Sauvegarder</button>
+      </section>
+    </main>
+
+    <footer>
+      <p>Appuyez sur <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>V</kbd> pour enregistrer</p>
+    </footer>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

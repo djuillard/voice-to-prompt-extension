@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Generateur d'icones</title>
+</head>
+<body>
+  <h1>Generateur d'icones pour l'extension</h1>
+  <p>Cliquez sur chaque bouton pour telecharger l'icone correspondante, puis placez-les dans le dossier extension/icons/</p>
+
+  <div style="margin: 20px 0;">
+    <canvas id="icon16" width="16" height="16"></canvas>
+    <button onclick="download('icon16')">Telecharger icon16.png</button>
+  </div>
+
+  <div style="margin: 20px 0;">
+    <canvas id="icon48" width="48" height="48"></canvas>
+    <button onclick="download('icon48')">Telecharger icon48.png</button>
+  </div>
+
+  <div style="margin: 20px 0;">
+    <canvas id="icon128" width="128" height="128"></canvas>
+    <button onclick="download('icon128')">Telecharger icon128.png</button>
+  </div>
+
+  <script>
+    function drawIcon(canvas) {
+      const ctx = canvas.getContext('2d');
+      const size = canvas.width;
+      const center = size / 2;
+      const radius = size * 0.45;
+
+      // Fond gradient
+      const gradient = ctx.createLinearGradient(0, 0, size, size);
+      gradient.addColorStop(0, '#667eea');
+      gradient.addColorStop(1, '#764ba2');
+
+      // Cercle de fond
+      ctx.beginPath();
+      ctx.arc(center, center, radius, 0, Math.PI * 2);
+      ctx.fillStyle = gradient;
+      ctx.fill();
+
+      // Microphone
+      ctx.fillStyle = 'white';
+      const micWidth = size * 0.2;
+      const micHeight = size * 0.35;
+      const micX = center - micWidth / 2;
+      const micY = center - micHeight / 2 - size * 0.05;
+
+      // Corps du micro (rectangle arrondi)
+      ctx.beginPath();
+      ctx.roundRect(micX, micY, micWidth, micHeight, micWidth / 2);
+      ctx.fill();
+
+      // Support du micro
+      ctx.strokeStyle = 'white';
+      ctx.lineWidth = size * 0.06;
+      ctx.lineCap = 'round';
+
+      // Ligne verticale
+      ctx.beginPath();
+      ctx.moveTo(center, micY + micHeight);
+      ctx.lineTo(center, micY + micHeight + size * 0.15);
+      ctx.stroke();
+
+      // Base
+      ctx.beginPath();
+      ctx.moveTo(center - size * 0.1, micY + micHeight + size * 0.15);
+      ctx.lineTo(center + size * 0.1, micY + micHeight + size * 0.15);
+      ctx.stroke();
+
+      // Arc autour du micro
+      ctx.beginPath();
+      ctx.arc(center, center, size * 0.28, Math.PI * 0.2, Math.PI * 0.8);
+      ctx.stroke();
+    }
+
+    // Dessiner toutes les icones
+    ['icon16', 'icon48', 'icon128'].forEach(id => {
+      const canvas = document.getElementById(id);
+      drawIcon(canvas);
+    });
+
+    function download(id) {
+      const canvas = document.getElementById(id);
+      const link = document.createElement('a');
+      link.download = id + '.png';
+      link.href = canvas.toDataURL('image/png');
+      link.click();
+    }
+  </script>
+</body>
+</html>

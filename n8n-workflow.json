@@ -1,0 +1,271 @@
+{
+  "name": "Voice to Text - Mistral STT + Cleanup",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "voice-to-text",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "id": "a1b2c3d4-webhook",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [250, 300],
+      "webhookId": "voice-to-text-webhook"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "test-check",
+              "leftValue": "={{ $json.body.test }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-if-test",
+      "name": "Is Test Request?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [470, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: true, message: \"Connexion reussie au webhook Voice to Text\" }) }}",
+        "options": {}
+      },
+      "id": "a1b2c3d4-respond-test",
+      "name": "Respond Test OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [690, 180]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Recuperer l'audio en base64 depuis le webhook\nconst audioBase64 = $input.first().json.body.audio;\n\nif (!audioBase64) {\n  throw new Error('Aucune donnee audio recue');\n}\n\nreturn [{\n  json: {\n    audioBase64: audioBase64,\n    timestamp: $input.first().json.body.timestamp || new Date().toISOString()\n  },\n  binary: {\n    data: await this.helpers.prepareBinaryData(\n      Buffer.from(audioBase64, 'base64'),\n      'recording.webm',\n      'audio/webm'\n    )\n  }\n}];"
+      },
+      "id": "a1b2c3d4-prepare",
+      "name": "Prepare Audio",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [690, 420]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.mistral.ai/v1/audio/transcriptions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.MISTRAL_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "file",
+              "inputDataFieldName": "data"
+            },
+            {
+              "parameterType": "formData",
+              "name": "model",
+              "value": "mistral-large-latest"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "a1b2c3d4-stt",
+      "name": "Mistral STT",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [910, 420],
+      "notesInFlow": true,
+      "notes": "Transcription audio avec Mistral"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Verifier si la transcription a reussi\nconst sttResponse = $input.first().json;\n\nif (!sttResponse.text && !sttResponse.transcription) {\n  throw new Error('Echec de la transcription: ' + JSON.stringify(sttResponse));\n}\n\nconst transcribedText = sttResponse.text || sttResponse.transcription || '';\n\nreturn [{\n  json: {\n    text: transcribedText.trim()\n  }\n}];"
+      },
+      "id": "a1b2c3d4-check-stt",
+      "name": "Check STT Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1010, 420]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.mistral.ai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.MISTRAL_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"mistral-small-latest\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"Tu es un assistant qui transforme des transcriptions orales en prompts ecrits professionnels. Regles : retire les hesitations, repetitions, et tics de langage. Structure en phrases claires. Conserve l'intention et le ton. Ajoute une ponctuation appropriee. Ne change pas le fond, optimise la forme. Reponds uniquement avec le texte nettoye, sans commentaires ni explications.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": {{ JSON.stringify(\"Voici la transcription a nettoyer : \" + $json.text) }}\n    }\n  ],\n  \"temperature\": 0.3,\n  \"max_tokens\": 2000\n}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "a1b2c3d4-cleanup",
+      "name": "Mistral Cleanup",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1130, 420],
+      "notesInFlow": true,
+      "notes": "Nettoyage du texte transcrit"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extraire le texte nettoye de la reponse Mistral\nconst response = $input.first().json;\n\nlet cleanedText = '';\n\nif (response.choices && response.choices[0] && response.choices[0].message) {\n  cleanedText = response.choices[0].message.content;\n} else {\n  throw new Error('Format de reponse Mistral inattendu: ' + JSON.stringify(response));\n}\n\n// Nettoyer le texte\ncleanedText = cleanedText.trim();\n\n// Recuperer le texte original\nconst originalText = $('Check STT Result').first().json.text || '';\n\nreturn [{\n  json: {\n    cleanedText: cleanedText,\n    originalText: originalText,\n    timestamp: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "a1b2c3d4-format",
+      "name": "Format Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1350, 420]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      },
+      "id": "a1b2c3d4-respond-ok",
+      "name": "Respond Success",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1570, 420]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Is Test Request?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Test Request?": {
+      "main": [
+        [
+          {
+            "node": "Respond Test OK",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Audio",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Audio": {
+      "main": [
+        [
+          {
+            "node": "Mistral STT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mistral STT": {
+      "main": [
+        [
+          {
+            "node": "Check STT Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check STT Result": {
+      "main": [
+        [
+          {
+            "node": "Mistral Cleanup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mistral Cleanup": {
+      "main": [
+        [
+          {
+            "node": "Format Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Response": {
+      "main": [
+        [
+          {
+            "node": "Respond Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": ""
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 0,
+  "pinData": {}
+}
