@@ -60,7 +60,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Recuperer l'audio en base64 depuis le webhook\nconst audioBase64 = $input.first().json.body.audio;\n\nif (!audioBase64) {\n  throw new Error('Aucune donnee audio recue');\n}\n\nreturn [{\n  json: {\n    audioBase64: audioBase64,\n    timestamp: $input.first().json.body.timestamp || new Date().toISOString()\n  },\n  binary: {\n    data: await this.helpers.prepareBinaryData(\n      Buffer.from(audioBase64, 'base64'),\n      'recording.webm',\n      'audio/webm'\n    )\n  }\n}];"
+        "jsCode": "// Recuperer l'audio en base64 depuis le webhook\nconst audioBase64 = $input.first().json.body.audio;\n\nif (!audioBase64) {\n  throw new Error('Aucune donnee audio recue');\n}\n\nreturn [{\n  json: {\n    audioBase64: audioBase64,\n    timestamp: $input.first().json.body.timestamp || new Date().toISOString()\n  },\n  binary: {\n    data: await this.helpers.prepareBinaryData(\n      Buffer.from(audioBase64, 'base64'),\n      'recording.mp3',\n      'audio/mpeg'\n    )\n  }\n}];"
       },
       "id": "a1b2c3d4-prepare",
       "name": "Prepare Audio",

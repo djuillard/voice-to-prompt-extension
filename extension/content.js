@@ -1,7 +1,9 @@
 // Voice to Text - Content Script
 // Gère l'enregistrement audio et l'injection de texte dans les champs
 
-let mediaRecorder = null;
+let audioContext = null;
+let mediaStream = null;
+let scriptProcessor = null;
 let audioChunks = [];
 let isRecording = false;
 let recordingIndicator = null;
@@ -28,54 +30,36 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 
-// Démarrer l'enregistrement audio
+// Démarrer l'enregistrement audio (capture PCM pour encodage MP3)
 async function startRecording() {
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({
+    mediaStream = await navigator.mediaDevices.getUserMedia({
       audio: {
         channelCount: 1,
-        sampleRate: 16000,
+        sampleRate: 44100,
         echoCancellation: true,
         noiseSuppression: true
       }
     });
 
-    // Utiliser webm avec opus pour une meilleure compatibilité
-    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-      ? 'audio/webm;codecs=opus'
-      : 'audio/webm';
+    audioContext = new AudioContext({ sampleRate: 44100 });
+    const source = audioContext.createMediaStreamSource(mediaStream);
 
-    mediaRecorder = new MediaRecorder(stream, {
-      mimeType: mimeType,
-      audioBitsPerSecond: 128000
-    });
-
+    // Utiliser ScriptProcessorNode pour capturer les échantillons PCM
+    scriptProcessor = audioContext.createScriptProcessor(4096, 1, 1);
     audioChunks = [];
 
-    mediaRecorder.ondataavailable = (event) => {
-      if (event.data.size > 0) {
-        audioChunks.push(event.data);
+    scriptProcessor.onaudioprocess = (event) => {
+      if (isRecording) {
+        const inputData = event.inputBuffer.getChannelData(0);
+        // Copier les données car le buffer est réutilisé
+        audioChunks.push(new Float32Array(inputData));
       }
     };
 
-    mediaRecorder.onstop = async () => {
-      // Arrêter les tracks audio
-      stream.getTracks().forEach(track => track.stop());
+    source.connect(scriptProcessor);
+    scriptProcessor.connect(audioContext.destination);
 
-      // Convertir en base64
-      const audioBlob = new Blob(audioChunks, { type: mimeType });
-      const base64Audio = await blobToBase64(audioBlob);
-
-      // Envoyer au background script
-      chrome.runtime.sendMessage({
-        action: 'recording-stopped',
-        audioBase64: base64Audio
-      });
-
-      hideRecordingIndicator();
-    };
-
-    mediaRecorder.start(100); // Collecter les données toutes les 100ms
     isRecording = true;
     showRecordingIndicator();
     showNotification('Enregistrement en cours...', 'info');
@@ -87,25 +71,116 @@ async function startRecording() {
 }
 
 // Arrêter l'enregistrement
-function stopRecording() {
-  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-    mediaRecorder.stop();
-    isRecording = false;
+async function stopRecording() {
+  if (!isRecording) return;
+
+  isRecording = false;
+  showNotification('Conversion en MP3...', 'info');
+
+  // Arrêter les connexions audio
+  if (scriptProcessor) {
+    scriptProcessor.disconnect();
+    scriptProcessor = null;
+  }
+  if (audioContext) {
+    await audioContext.close();
+    audioContext = null;
+  }
+  if (mediaStream) {
+    mediaStream.getTracks().forEach(track => track.stop());
+    mediaStream = null;
+  }
+
+  hideRecordingIndicator();
+
+  // Encoder en MP3
+  try {
+    const mp3Base64 = await encodeToMP3(audioChunks);
+
+    // Envoyer au background script
+    chrome.runtime.sendMessage({
+      action: 'recording-stopped',
+      audioBase64: mp3Base64
+    });
+
     showNotification('Traitement en cours...', 'info');
+  } catch (error) {
+    console.error('Erreur encodage MP3:', error);
+    showNotification(`Erreur encodage: ${error.message}`, 'error');
   }
 }
 
-// Convertir un Blob en base64
-function blobToBase64(blob) {
+// Encoder les échantillons PCM en MP3 avec lamejs
+async function encodeToMP3(audioChunks) {
   return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      // Retirer le préfixe "data:audio/webm;base64,"
-      const base64 = reader.result.split(',')[1];
-      resolve(base64);
-    };
-    reader.onerror = reject;
-    reader.readAsDataURL(blob);
+    try {
+      // Charger lamejs dynamiquement
+      const script = document.createElement('script');
+      script.src = chrome.runtime.getURL('lame.min.js');
+      script.onload = () => {
+        try {
+          // Fusionner tous les chunks
+          const totalLength = audioChunks.reduce((acc, chunk) => acc + chunk.length, 0);
+          const mergedFloat32 = new Float32Array(totalLength);
+          let offset = 0;
+          for (const chunk of audioChunks) {
+            mergedFloat32.set(chunk, offset);
+            offset += chunk.length;
+          }
+
+          // Convertir Float32 [-1, 1] en Int16 [-32768, 32767]
+          const samples = new Int16Array(mergedFloat32.length);
+          for (let i = 0; i < mergedFloat32.length; i++) {
+            const s = Math.max(-1, Math.min(1, mergedFloat32[i]));
+            samples[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+          }
+
+          // Encoder en MP3
+          const mp3encoder = new lamejs.Mp3Encoder(1, 44100, 128);
+          const mp3Data = [];
+
+          // Encoder par blocs de 1152 échantillons
+          const sampleBlockSize = 1152;
+          for (let i = 0; i < samples.length; i += sampleBlockSize) {
+            const sampleChunk = samples.subarray(i, i + sampleBlockSize);
+            const mp3buf = mp3encoder.encodeBuffer(sampleChunk);
+            if (mp3buf.length > 0) {
+              mp3Data.push(mp3buf);
+            }
+          }
+
+          // Finaliser
+          const mp3End = mp3encoder.flush();
+          if (mp3End.length > 0) {
+            mp3Data.push(mp3End);
+          }
+
+          // Fusionner en un seul Uint8Array
+          const totalMp3Length = mp3Data.reduce((acc, buf) => acc + buf.length, 0);
+          const mp3Array = new Uint8Array(totalMp3Length);
+          let mp3Offset = 0;
+          for (const buf of mp3Data) {
+            mp3Array.set(buf, mp3Offset);
+            mp3Offset += buf.length;
+          }
+
+          // Convertir en base64
+          let binary = '';
+          for (let i = 0; i < mp3Array.length; i++) {
+            binary += String.fromCharCode(mp3Array[i]);
+          }
+          const base64 = btoa(binary);
+
+          resolve(base64);
+        } catch (encodeError) {
+          reject(encodeError);
+        }
+      };
+      script.onerror = () => reject(new Error('Impossible de charger lame.min.js'));
+      document.head.appendChild(script);
+    } catch (error) {
+      reject(error);
+    }
   });
 }
 

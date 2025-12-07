@@ -42,5 +42,11 @@
       },
       "description": "Démarrer/Arrêter l'enregistrement vocal"
     }
-  }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["lame.min.js"],
+      "matches": ["<all_urls>"]
+    }
+  ]
 }
