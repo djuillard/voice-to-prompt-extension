@@ -11,6 +11,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const testResult = document.getElementById('testResult');
   const saveBtn = document.getElementById('saveBtn');
   const recordBtn = document.getElementById('recordBtn');
+  const logsBtn = document.getElementById('logsBtn');
   const statusEl = document.getElementById('status');
   const statusText = statusEl.querySelector('.status-text');
 
@@ -24,6 +25,7 @@ document.addEventListener('DOMContentLoaded', () => {
   saveBtn.addEventListener('click', saveConfig);
   testBtn.addEventListener('click', testConnection);
   recordBtn.addEventListener('click', toggleRecording);
+  logsBtn.addEventListener('click', openLogs);
 
   // Charger la configuration depuis le storage
   function loadConfig() {
@@ -152,6 +154,11 @@ document.addEventListener('DOMContentLoaded', () => {
       recordBtn.classList.remove('recording');
       recordBtn.querySelector('.btn-text').textContent = 'Enregistrer';
     }
+  }
+
+  // Ouvrir la page des logs
+  function openLogs() {
+    chrome.tabs.create({ url: chrome.runtime.getURL('logs.html') });
   }
 
   // Actualiser le statut périodiquement

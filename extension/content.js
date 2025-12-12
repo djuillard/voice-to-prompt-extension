@@ -1,38 +1,134 @@
 // Voice to Text - Content Script
 // Gère l'enregistrement audio et l'injection de texte dans les champs
 
+const LOG_SRC = 'Content';
+
+// Logger simplifié pour content script (pas d'accès direct au storage depuis ici)
+const ContentLogger = {
+  _logs: [],
+
+  log(level, message, data = null) {
+    const entry = {
+      timestamp: new Date().toISOString(),
+      level,
+      message,
+      data
+    };
+
+    this._logs.push(entry);
+
+    // Garder seulement les 100 derniers logs en mémoire
+    if (this._logs.length > 100) {
+      this._logs.shift();
+    }
+
+    const colors = {
+      DEBUG: '#888',
+      INFO: '#2196F3',
+      WARN: '#FF9800',
+      ERROR: '#F44336'
+    };
+
+    console.log(
+      `%c[VTT ${level}] %c[${LOG_SRC}] %c${message}`,
+      `color: ${colors[level]}; font-weight: bold`,
+      'color: #9C27B0',
+      'color: inherit',
+      data || ''
+    );
+
+    // Envoyer au background pour stockage persistant
+    try {
+      chrome.runtime.sendMessage({
+        action: 'log-entry',
+        entry: {
+          ...entry,
+          source: LOG_SRC
+        }
+      }).catch(() => { }); // Ignorer les erreurs si le background n'est pas disponible
+    } catch (e) {
+      // Silencieux
+    }
+  },
+
+  debug(message, data = null) { this.log('DEBUG', message, data); },
+  info(message, data = null) { this.log('INFO', message, data); },
+  warn(message, data = null) { this.log('WARN', message, data); },
+  error(message, data = null) { this.log('ERROR', message, data); }
+};
+
 let audioContext = null;
 let mediaStream = null;
 let scriptProcessor = null;
 let audioChunks = [];
 let isRecording = false;
 let recordingIndicator = null;
+let recordingStartTime = null;
+
+// Timeout de sécurité pour les enregistrements longs (5 minutes max)
+const MAX_RECORDING_DURATION = 5 * 60 * 1000;
+let recordingTimeout = null;
+
+ContentLogger.info('Content script chargé', { url: window.location.href });
 
 // Écoute des messages du background script
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  ContentLogger.debug(`Message reçu: ${message.action}`);
+
   switch (message.action) {
     case 'start-recording':
-      startRecording();
-      sendResponse({ success: true });
-      break;
+      startRecording()
+        .then(() => sendResponse({ success: true }))
+        .catch(err => {
+          ContentLogger.error('Erreur startRecording', { error: err.message });
+          sendResponse({ success: false, error: err.message });
+        });
+      return true; // Réponse asynchrone
+
     case 'stop-recording':
-      stopRecording();
-      sendResponse({ success: true });
-      break;
+      stopRecording()
+        .then(() => sendResponse({ success: true }))
+        .catch(err => {
+          ContentLogger.error('Erreur stopRecording', { error: err.message });
+          sendResponse({ success: false, error: err.message });
+        });
+      return true; // Réponse asynchrone
+
     case 'inject-text':
       injectText(message.text);
       sendResponse({ success: true });
       break;
+
     case 'show-error':
       showNotification(message.message, 'error');
       sendResponse({ success: true });
+      break;
+
+    case 'get-recording-state':
+      sendResponse({
+        isRecording,
+        duration: recordingStartTime ? Date.now() - recordingStartTime : 0,
+        chunksCount: audioChunks.length
+      });
       break;
   }
 });
 
 // Démarrer l'enregistrement audio (capture PCM pour encodage MP3)
 async function startRecording() {
+  ContentLogger.info('Démarrage enregistrement demandé', {
+    isCurrentlyRecording: isRecording
+  });
+
+  // Éviter les démarrages multiples
+  if (isRecording) {
+    ContentLogger.warn('Enregistrement déjà en cours, ignoré');
+    return;
+  }
+
   try {
+    ContentLogger.debug('Demande accès microphone...');
+
     mediaStream = await navigator.mediaDevices.getUserMedia({
       audio: {
         channelCount: 1,
@@ -42,17 +138,22 @@ async function startRecording() {
       }
     });
 
+    ContentLogger.info('Microphone obtenu', {
+      tracks: mediaStream.getAudioTracks().length,
+      trackSettings: mediaStream.getAudioTracks()[0]?.getSettings()
+    });
+
     audioContext = new AudioContext({ sampleRate: 44100 });
     const source = audioContext.createMediaStreamSource(mediaStream);
 
     // Utiliser ScriptProcessorNode pour capturer les échantillons PCM
     scriptProcessor = audioContext.createScriptProcessor(4096, 1, 1);
     audioChunks = [];
+    recordingStartTime = Date.now();
 
     scriptProcessor.onaudioprocess = (event) => {
       if (isRecording) {
         const inputData = event.inputBuffer.getChannelData(0);
-        // Copier les données car le buffer est réutilisé
         audioChunks.push(new Float32Array(inputData));
       }
     };
@@ -61,150 +162,274 @@ async function startRecording() {
     scriptProcessor.connect(audioContext.destination);
 
     isRecording = true;
+
+    // Configurer le timeout de sécurité
+    recordingTimeout = setTimeout(() => {
+      ContentLogger.warn('Timeout enregistrement atteint (5 min), arrêt automatique');
+      stopRecording();
+    }, MAX_RECORDING_DURATION);
+
     showRecordingIndicator();
     showNotification('Enregistrement en cours...', 'info');
 
+    // Confirmer au background que l'enregistrement a bien démarré
+    chrome.runtime.sendMessage({ action: 'recording-started' });
+
+    ContentLogger.info('Enregistrement démarré avec succès');
+
   } catch (error) {
-    console.error('Erreur lors du démarrage de l\'enregistrement:', error);
+    ContentLogger.error('Erreur démarrage enregistrement', {
+      error: error.message,
+      name: error.name,
+      stack: error.stack
+    });
+
+    // Nettoyer en cas d'erreur
+    await cleanupRecording();
+
+    // Informer le background de l'erreur
+    chrome.runtime.sendMessage({
+      action: 'recording-error',
+      error: error.message
+    });
+
     showNotification(`Erreur microphone: ${error.message}`, 'error');
+    throw error;
   }
 }
 
-// Arrêter l'enregistrement
-async function stopRecording() {
-  if (!isRecording) return;
+// Nettoyer les ressources d'enregistrement
+async function cleanupRecording() {
+  ContentLogger.debug('Nettoyage des ressources d\'enregistrement');
 
-  isRecording = false;
-  showNotification('Conversion en MP3...', 'info');
+  // Annuler le timeout de sécurité
+  if (recordingTimeout) {
+    clearTimeout(recordingTimeout);
+    recordingTimeout = null;
+  }
 
-  // Arrêter les connexions audio
+  // Déconnecter le processeur audio
   if (scriptProcessor) {
-    scriptProcessor.disconnect();
+    try {
+      scriptProcessor.disconnect();
+    } catch (e) {
+      ContentLogger.debug('scriptProcessor déjà déconnecté');
+    }
     scriptProcessor = null;
   }
+
+  // Fermer le contexte audio
   if (audioContext) {
-    await audioContext.close();
+    try {
+      if (audioContext.state !== 'closed') {
+        await audioContext.close();
+      }
+    } catch (e) {
+      ContentLogger.debug('audioContext déjà fermé');
+    }
     audioContext = null;
   }
+
+  // Arrêter les pistes du microphone (IMPORTANT pour l'icône micro)
   if (mediaStream) {
-    mediaStream.getTracks().forEach(track => track.stop());
+    const tracks = mediaStream.getTracks();
+    ContentLogger.debug('Arrêt des pistes média', { tracksCount: tracks.length });
+
+    for (const track of tracks) {
+      track.stop();
+      ContentLogger.debug('Piste arrêtée', {
+        kind: track.kind,
+        label: track.label,
+        readyState: track.readyState
+      });
+    }
     mediaStream = null;
   }
 
   hideRecordingIndicator();
+  isRecording = false;
+  recordingStartTime = null;
+
+  ContentLogger.info('Ressources nettoyées');
+}
+
+// Arrêter l'enregistrement
+async function stopRecording() {
+  ContentLogger.info('Arrêt enregistrement demandé', {
+    isRecording,
+    chunksCount: audioChunks.length,
+    duration: recordingStartTime ? Date.now() - recordingStartTime : 0
+  });
+
+  if (!isRecording) {
+    ContentLogger.warn('Pas d\'enregistrement en cours');
+    // Nettoyer quand même au cas où il y aurait des ressources orphelines
+    await cleanupRecording();
+    return;
+  }
+
+  // Marquer comme arrêté immédiatement pour éviter les doubles arrêts
+  const wasRecording = isRecording;
+  isRecording = false;
+
+  showNotification('Conversion en MP3...', 'info');
+
+  // Sauvegarder les chunks avant nettoyage
+  const chunksToProcess = audioChunks;
+  const recordingDuration = recordingStartTime ? Date.now() - recordingStartTime : 0;
+
+  // Nettoyer les ressources
+  await cleanupRecording();
 
   // Encoder en MP3
   try {
-    const mp3Base64 = await encodeToMP3(audioChunks);
+    ContentLogger.info('Début encodage MP3', {
+      chunksCount: chunksToProcess.length,
+      recordingDurationMs: recordingDuration
+    });
+
+    if (chunksToProcess.length === 0) {
+      throw new Error('Aucun audio capturé');
+    }
+
+    const mp3Base64 = await encodeToMP3(chunksToProcess);
+    ContentLogger.info('MP3 encodé', {
+      base64Length: mp3Base64.length,
+      estimatedSizeKB: Math.round(mp3Base64.length * 0.75 / 1024)
+    });
+
+    if (!mp3Base64 || mp3Base64.length === 0) {
+      throw new Error('MP3 vide - aucun audio capturé');
+    }
 
     // Envoyer au background script
+    ContentLogger.info('Envoi au background script...');
     chrome.runtime.sendMessage({
       action: 'recording-stopped',
       audioBase64: mp3Base64
+    }, (response) => {
+      ContentLogger.debug('Réponse du background', { response });
     });
 
     showNotification('Traitement en cours...', 'info');
+
   } catch (error) {
-    console.error('Erreur encodage MP3:', error);
+    ContentLogger.error('Erreur encodage MP3', {
+      error: error.message,
+      stack: error.stack
+    });
+
     showNotification(`Erreur encodage: ${error.message}`, 'error');
+
+    // Informer le background de l'erreur
+    chrome.runtime.sendMessage({
+      action: 'recording-error',
+      error: error.message
+    });
   }
 }
 
 // Encoder les échantillons PCM en MP3 avec lamejs
-async function encodeToMP3(audioChunks) {
-  return new Promise((resolve, reject) => {
-    try {
-      // Charger lamejs dynamiquement
-      const script = document.createElement('script');
-      script.src = chrome.runtime.getURL('lame.min.js');
-      script.onload = () => {
-        try {
-          // Fusionner tous les chunks
-          const totalLength = audioChunks.reduce((acc, chunk) => acc + chunk.length, 0);
-          const mergedFloat32 = new Float32Array(totalLength);
-          let offset = 0;
-          for (const chunk of audioChunks) {
-            mergedFloat32.set(chunk, offset);
-            offset += chunk.length;
-          }
+async function encodeToMP3(chunks) {
+  ContentLogger.debug('encodeToMP3 démarré', { chunksCount: chunks.length });
 
-          // Convertir Float32 [-1, 1] en Int16 [-32768, 32767]
-          const samples = new Int16Array(mergedFloat32.length);
-          for (let i = 0; i < mergedFloat32.length; i++) {
-            const s = Math.max(-1, Math.min(1, mergedFloat32[i]));
-            samples[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-          }
-
-          // Encoder en MP3
-          const mp3encoder = new lamejs.Mp3Encoder(1, 44100, 128);
-          const mp3Data = [];
-
-          // Encoder par blocs de 1152 échantillons
-          const sampleBlockSize = 1152;
-          for (let i = 0; i < samples.length; i += sampleBlockSize) {
-            const sampleChunk = samples.subarray(i, i + sampleBlockSize);
-            const mp3buf = mp3encoder.encodeBuffer(sampleChunk);
-            if (mp3buf.length > 0) {
-              mp3Data.push(mp3buf);
-            }
-          }
-
-          // Finaliser
-          const mp3End = mp3encoder.flush();
-          if (mp3End.length > 0) {
-            mp3Data.push(mp3End);
-          }
-
-          // Fusionner en un seul Uint8Array
-          const totalMp3Length = mp3Data.reduce((acc, buf) => acc + buf.length, 0);
-          const mp3Array = new Uint8Array(totalMp3Length);
-          let mp3Offset = 0;
-          for (const buf of mp3Data) {
-            mp3Array.set(buf, mp3Offset);
-            mp3Offset += buf.length;
-          }
-
-          // Convertir en base64
-          let binary = '';
-          for (let i = 0; i < mp3Array.length; i++) {
-            binary += String.fromCharCode(mp3Array[i]);
-          }
-          const base64 = btoa(binary);
-
-          resolve(base64);
-        } catch (encodeError) {
-          reject(encodeError);
-        }
-      };
-      script.onerror = () => reject(new Error('Impossible de charger lame.min.js'));
-      document.head.appendChild(script);
-    } catch (error) {
-      reject(error);
-    }
+  // Fusionner tous les chunks
+  const totalLength = chunks.reduce((acc, chunk) => acc + chunk.length, 0);
+  ContentLogger.debug('Taille totale PCM', {
+    totalSamples: totalLength,
+    estimatedDurationSec: totalLength / 44100
   });
+
+  const mergedFloat32 = new Float32Array(totalLength);
+  let offset = 0;
+  for (const chunk of chunks) {
+    mergedFloat32.set(chunk, offset);
+    offset += chunk.length;
+  }
+
+  // Convertir Float32 [-1, 1] en Int16 [-32768, 32767]
+  const samples = new Int16Array(mergedFloat32.length);
+  for (let i = 0; i < mergedFloat32.length; i++) {
+    const s = Math.max(-1, Math.min(1, mergedFloat32[i]));
+    samples[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+  }
+
+  // Vérifier que lamejs est disponible
+  if (typeof lamejs === 'undefined') {
+    ContentLogger.error('lamejs non disponible');
+    throw new Error('lamejs non chargé - veuillez recharger la page');
+  }
+
+  ContentLogger.debug('Encodage MP3 avec lamejs...');
+
+  // Encoder en MP3
+  const mp3encoder = new lamejs.Mp3Encoder(1, 44100, 128);
+  const mp3Data = [];
+
+  // Encoder par blocs de 1152 échantillons
+  const sampleBlockSize = 1152;
+  for (let i = 0; i < samples.length; i += sampleBlockSize) {
+    const sampleChunk = samples.subarray(i, i + sampleBlockSize);
+    const mp3buf = mp3encoder.encodeBuffer(sampleChunk);
+    if (mp3buf.length > 0) {
+      mp3Data.push(mp3buf);
+    }
+  }
+
+  // Finaliser
+  const mp3End = mp3encoder.flush();
+  if (mp3End.length > 0) {
+    mp3Data.push(mp3End);
+  }
+
+  // Fusionner en un seul Uint8Array
+  const totalMp3Length = mp3Data.reduce((acc, buf) => acc + buf.length, 0);
+  const mp3Array = new Uint8Array(totalMp3Length);
+  let mp3Offset = 0;
+  for (const buf of mp3Data) {
+    mp3Array.set(buf, mp3Offset);
+    mp3Offset += buf.length;
+  }
+
+  ContentLogger.debug('MP3 fusionné', { mp3ByteLength: mp3Array.length });
+
+  // Convertir en base64
+  let binary = '';
+  for (let i = 0; i < mp3Array.length; i++) {
+    binary += String.fromCharCode(mp3Array[i]);
+  }
+
+  return btoa(binary);
 }
 
 // Injecter le texte dans le champ actif
 function injectText(text) {
+  ContentLogger.info('Injection de texte', { textLength: text.length });
+
   const activeElement = document.activeElement;
 
-  // Vérifier si c'est un élément éditable
   if (isEditableElement(activeElement)) {
     insertTextAtCursor(activeElement, text);
     showNotification('Texte inséré!', 'success');
+    ContentLogger.info('Texte inséré dans élément actif', {
+      tagName: activeElement.tagName
+    });
   } else {
-    // Chercher le premier champ éditable visible
     const editableField = findFirstEditableField();
     if (editableField) {
       editableField.focus();
       insertTextAtCursor(editableField, text);
       showNotification('Texte inséré!', 'success');
+      ContentLogger.info('Texte inséré dans premier champ éditable', {
+        tagName: editableField.tagName
+      });
     } else {
-      // Copier dans le presse-papier en fallback
       navigator.clipboard.writeText(text).then(() => {
         showNotification('Texte copié dans le presse-papier (aucun champ trouvé)', 'info');
-      }).catch(() => {
+        ContentLogger.info('Texte copié dans le presse-papier');
+      }).catch((err) => {
         showNotification('Impossible d\'insérer le texte', 'error');
+        ContentLogger.error('Erreur copie presse-papier', { error: err.message });
       });
     }
   }
@@ -259,7 +484,6 @@ function isVisible(element) {
 // Insérer du texte à la position du curseur
 function insertTextAtCursor(element, text) {
   if (element.isContentEditable) {
-    // Pour les éléments contenteditable
     const selection = window.getSelection();
     const range = selection.getRangeAt(0);
     range.deleteContents();
@@ -268,10 +492,8 @@ function insertTextAtCursor(element, text) {
     selection.removeAllRanges();
     selection.addRange(range);
 
-    // Déclencher un événement input
     element.dispatchEvent(new Event('input', { bubbles: true }));
   } else {
-    // Pour input et textarea
     const start = element.selectionStart;
     const end = element.selectionEnd;
     const value = element.value;
@@ -279,7 +501,6 @@ function insertTextAtCursor(element, text) {
     element.value = value.substring(0, start) + text + value.substring(end);
     element.selectionStart = element.selectionEnd = start + text.length;
 
-    // Déclencher les événements pour les frameworks JS
     element.dispatchEvent(new Event('input', { bubbles: true }));
     element.dispatchEvent(new Event('change', { bubbles: true }));
   }
@@ -287,7 +508,10 @@ function insertTextAtCursor(element, text) {
 
 // Afficher l'indicateur d'enregistrement
 function showRecordingIndicator() {
-  if (recordingIndicator) return;
+  if (recordingIndicator) {
+    ContentLogger.debug('Indicateur déjà présent');
+    return;
+  }
 
   recordingIndicator = document.createElement('div');
   recordingIndicator.id = 'voice-to-text-recording-indicator';
@@ -332,6 +556,7 @@ function showRecordingIndicator() {
   `;
 
   document.body.appendChild(recordingIndicator);
+  ContentLogger.debug('Indicateur d\'enregistrement affiché');
 }
 
 // Masquer l'indicateur d'enregistrement
@@ -339,12 +564,12 @@ function hideRecordingIndicator() {
   if (recordingIndicator) {
     recordingIndicator.remove();
     recordingIndicator = null;
+    ContentLogger.debug('Indicateur d\'enregistrement masqué');
   }
 }
 
 // Afficher une notification
 function showNotification(message, type = 'info') {
-  // Supprimer les notifications existantes
   const existing = document.querySelectorAll('.voice-to-text-notification');
   existing.forEach(el => el.remove());
 
@@ -385,8 +610,22 @@ function showNotification(message, type = 'info') {
 
   document.body.appendChild(notification);
 
-  // Auto-suppression après 3 secondes
   setTimeout(() => {
     notification.remove();
   }, 3000);
 }
+
+// Nettoyage si la page est fermée pendant l'enregistrement
+window.addEventListener('beforeunload', () => {
+  if (isRecording) {
+    ContentLogger.warn('Page fermée pendant enregistrement, nettoyage...');
+    cleanupRecording();
+  }
+});
+
+// Nettoyage si le content script est déchargé
+window.addEventListener('unload', () => {
+  if (isRecording) {
+    cleanupRecording();
+  }
+});
