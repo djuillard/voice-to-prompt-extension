@@ -67,6 +67,8 @@ let recordingStartTime = null;
 
 // Timeout de sécurité pour les enregistrements longs (5 minutes max)
 const MAX_RECORDING_DURATION = 5 * 60 * 1000;
+// Durée minimum d'enregistrement (configurable, par défaut 1 seconde)
+let minRecordingDuration = 1000;
 let recordingTimeout = null;
 
 ContentLogger.info('Content script chargé', { url: window.location.href });
@@ -77,6 +79,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   switch (message.action) {
     case 'start-recording':
+      // Mettre à jour la durée minimum si fournie
+      if (message.minDuration !== undefined) {
+        minRecordingDuration = message.minDuration * 1000; // Convertir en ms
+        ContentLogger.debug('Durée minimum configurée', { minDurationMs: minRecordingDuration });
+      }
       startRecording()
         .then(() => sendResponse({ success: true }))
         .catch(err => {
@@ -255,10 +262,12 @@ async function cleanupRecording() {
 
 // Arrêter l'enregistrement
 async function stopRecording() {
+  const recordingDuration = recordingStartTime ? Date.now() - recordingStartTime : 0;
+
   ContentLogger.info('Arrêt enregistrement demandé', {
     isRecording,
     chunksCount: audioChunks.length,
-    duration: recordingStartTime ? Date.now() - recordingStartTime : 0
+    duration: recordingDuration
   });
 
   if (!isRecording) {
@@ -269,14 +278,29 @@ async function stopRecording() {
   }
 
   // Marquer comme arrêté immédiatement pour éviter les doubles arrêts
-  const wasRecording = isRecording;
   isRecording = false;
-
-  showNotification('Conversion en MP3...', 'info');
 
   // Sauvegarder les chunks avant nettoyage
   const chunksToProcess = audioChunks;
-  const recordingDuration = recordingStartTime ? Date.now() - recordingStartTime : 0;
+
+  // Vérifier la durée minimale
+  if (recordingDuration < minRecordingDuration) {
+    const minSeconds = (minRecordingDuration / 1000).toFixed(1);
+    ContentLogger.warn('Enregistrement trop court, ignoré', {
+      duration: recordingDuration,
+      minRequired: minRecordingDuration
+    });
+    await cleanupRecording();
+    showNotification(`Enregistrement trop court (< ${minSeconds}s), ignoré`, 'info');
+    // Informer le background que l'enregistrement est annulé (pas d'audio à traiter)
+    chrome.runtime.sendMessage({
+      action: 'recording-error',
+      error: `Enregistrement trop court (< ${minSeconds} seconde${minSeconds > 1 ? 's' : ''})`
+    });
+    return;
+  }
+
+  showNotification('Conversion en MP3...', 'info');
 
   // Nettoyer les ressources
   await cleanupRecording();
