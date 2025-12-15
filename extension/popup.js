@@ -6,6 +6,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const webhookUrlInput = document.getElementById('webhookUrl');
   const authUsernameInput = document.getElementById('authUsername');
   const authPasswordInput = document.getElementById('authPassword');
+  const minDurationInput = document.getElementById('minDuration');
   const hotkeyInput = document.getElementById('hotkey');
   const testBtn = document.getElementById('testBtn');
   const testResult = document.getElementById('testResult');
@@ -29,7 +30,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Charger la configuration depuis le storage
   function loadConfig() {
-    chrome.storage.sync.get(['webhookUrl', 'authUsername', 'authPassword', 'hotkey'], (result) => {
+    chrome.storage.sync.get(['webhookUrl', 'authUsername', 'authPassword', 'minDuration', 'hotkey'], (result) => {
       if (result.webhookUrl) {
         webhookUrlInput.value = result.webhookUrl;
       }
@@ -38,6 +39,9 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       if (result.authPassword) {
         authPasswordInput.value = result.authPassword;
+      }
+      if (result.minDuration !== undefined) {
+        minDurationInput.value = result.minDuration;
       }
       if (result.hotkey) {
         hotkeyInput.value = result.hotkey;
@@ -50,6 +54,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const webhookUrl = webhookUrlInput.value.trim();
     const authUsername = authUsernameInput.value.trim();
     const authPassword = authPasswordInput.value;
+    const minDuration = parseFloat(minDurationInput.value) || 1;
 
     if (!webhookUrl) {
       showTestResult('Veuillez entrer une URL de webhook', false);
@@ -67,7 +72,8 @@ document.addEventListener('DOMContentLoaded', () => {
     chrome.storage.sync.set({
       webhookUrl: webhookUrl,
       authUsername: authUsername,
-      authPassword: authPassword
+      authPassword: authPassword,
+      minDuration: minDuration
     }, () => {
       saveBtn.textContent = 'Sauvegardé!';
       saveBtn.classList.add('saved');

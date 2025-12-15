@@ -12,7 +12,8 @@ let recordingStartTime = null;
 // Configuration par défaut
 const DEFAULT_CONFIG = {
   webhookUrl: '',
-  hotkey: 'Ctrl+Shift+V'
+  hotkey: 'Ctrl+Shift+V',
+  minDuration: 1 // Durée minimum en secondes
 };
 
 // Initialisation
@@ -142,37 +143,36 @@ async function toggleRecording() {
 
     if (isRecording) {
       // Arrêter l'enregistrement
+      const duration = recordingStartTime ? Date.now() - recordingStartTime : 0;
       VTTLogger.info(LOG_SRC, 'Arrêt de l\'enregistrement demandé', {
         tabId: recordingTabId,
         currentTabId: tab.id,
-        duration: recordingStartTime ? Date.now() - recordingStartTime : 0
+        duration
       });
 
-      // Envoyer au bon onglet (celui qui enregistre)
+      // IMPORTANT: Marquer comme arrêté IMMÉDIATEMENT pour éviter les doubles déclenchements
       const targetTabId = recordingTabId || tab.id;
+      isRecording = false;
+      recordingStartTime = null;
 
       try {
         await chrome.tabs.sendMessage(targetTabId, { action: 'stop-recording' });
         VTTLogger.info(LOG_SRC, 'Message stop-recording envoyé', { targetTabId });
+        updateBadge('processing');
       } catch (error) {
         VTTLogger.error(LOG_SRC, 'Erreur envoi stop-recording', {
           error: error.message,
           targetTabId
         });
-        // Réinitialiser l'état en cas d'erreur
-        isRecording = false;
-        recordingStartTime = null;
+        // Réinitialiser complètement l'état en cas d'erreur
         recordingTabId = null;
         updateBadge('idle');
       }
 
-      // L'état sera mis à jour quand on recevra 'recording-stopped'
-      updateBadge('processing');
-
     } else {
       // Vérifier la configuration
-      const config = await chrome.storage.sync.get(['webhookUrl']);
-      VTTLogger.debug(LOG_SRC, 'Config vérifiée', { hasWebhook: !!config.webhookUrl });
+      const config = await chrome.storage.sync.get(['webhookUrl', 'minDuration']);
+      VTTLogger.debug(LOG_SRC, 'Config vérifiée', { hasWebhook: !!config.webhookUrl, minDuration: config.minDuration });
 
       if (!config.webhookUrl) {
         VTTLogger.warn(LOG_SRC, 'Webhook non configuré');
@@ -184,10 +184,14 @@ async function toggleRecording() {
       }
 
       // Démarrer l'enregistrement
-      VTTLogger.info(LOG_SRC, 'Démarrage enregistrement demandé', { tabId: tab.id });
+      const minDuration = config.minDuration !== undefined ? config.minDuration : DEFAULT_CONFIG.minDuration;
+      VTTLogger.info(LOG_SRC, 'Démarrage enregistrement demandé', { tabId: tab.id, minDuration });
 
       try {
-        await chrome.tabs.sendMessage(tab.id, { action: 'start-recording' });
+        await chrome.tabs.sendMessage(tab.id, {
+          action: 'start-recording',
+          minDuration: minDuration
+        });
         // L'état sera mis à jour quand on recevra 'recording-started'
         // Mais on initialise quand même au cas où le message de confirmation n'arrive pas
         recordingTabId = tab.id;
