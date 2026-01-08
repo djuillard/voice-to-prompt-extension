@@ -1,0 +1,18 @@
+{
+  "testEnvironment": "jsdom",
+  "setupFilesAfterEnv": ["<rootDir>/tests/setup.js"],
+  "testMatch": ["**/tests/**/*.test.js"],
+  "collectCoverageFrom": [
+    "extension/**/*.js",
+    "!extension/lame.min.js",
+    "!extension/icons/**"
+  ],
+  "coverageThreshold": {
+    "global": {
+      "branches": 70,
+      "functions": 70,
+      "lines": 70,
+      "statements": 70
+    }
+  }
+}
