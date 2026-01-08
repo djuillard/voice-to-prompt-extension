@@ -74,8 +74,7 @@ let recordingTimeout = null;
 ContentLogger.info('Content script chargé', { url: window.location.href });
 
 // Écoute des messages du background script
-if (typeof chrome !== 'undefined' && chrome.runtime) {
-  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   ContentLogger.debug(`Message reçu: ${message.action}`);
 
   switch (message.action) {
@@ -120,8 +119,7 @@ if (typeof chrome !== 'undefined' && chrome.runtime) {
       });
       break;
   }
-  });
-}
+});
 
 // Démarrer l'enregistrement audio (capture PCM pour encodage MP3)
 async function startRecording() {
@@ -133,12 +131,6 @@ async function startRecording() {
   if (isRecording) {
     ContentLogger.warn('Enregistrement déjà en cours, ignoré');
     return;
-  }
-
-  // Vérifier qu'il n'y a pas de ressources audio orphelines
-  if (mediaStream || audioContext || scriptProcessor) {
-    ContentLogger.warn('Ressources audio détectées, nettoyage avant démarrage');
-    await cleanupRecording();
   }
 
   try {
@@ -188,13 +180,9 @@ async function startRecording() {
     showNotification('Enregistrement en cours...', 'info');
 
     // Confirmer au background que l'enregistrement a bien démarré
-    try {
-      await chrome.runtime.sendMessage({ action: 'recording-started' });
-      ContentLogger.info('Enregistrement démarré avec succès');
-    } catch (error) {
-      ContentLogger.error('Erreur envoi confirmation recording-started', { error: error.message });
-      // Continuer quand même car l'enregistrement est démarré
-    }
+    chrome.runtime.sendMessage({ action: 'recording-started' });
+
+    ContentLogger.info('Enregistrement démarré avec succès');
 
   } catch (error) {
     ContentLogger.error('Erreur démarrage enregistrement', {
@@ -665,17 +653,3 @@ window.addEventListener('unload', () => {
     cleanupRecording();
   }
 });
-
-// Export pour les tests
-if (typeof module !== 'undefined' && module.exports) {
-  module.exports = {
-    ContentLogger,
-    startRecording,
-    stopRecording,
-    cleanupRecording,
-    encodeToMP3,
-    injectText,
-    isEditableElement,
-    findFirstEditableField
-  };
-}
