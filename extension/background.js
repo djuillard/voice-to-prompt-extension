@@ -1,13 +1,18 @@
 // Voice to Text - Background Service Worker
 // Gère l'enregistrement audio et la communication avec n8n
 
-importScripts('logger.js');
+if (typeof importScripts !== 'undefined') {
+  importScripts('logger.js');
+} else {
+  global.VTTLogger = require('./logger.js');
+}
 
 const LOG_SRC = 'Background';
 
 let isRecording = false;
 let recordingTabId = null;
 let recordingStartTime = null;
+let isToggleProcessing = false;
 
 // Configuration par défaut
 const DEFAULT_CONFIG = {
@@ -17,32 +22,33 @@ const DEFAULT_CONFIG = {
 };
 
 // Initialisation
-chrome.runtime.onInstalled.addListener(() => {
-  VTTLogger.info(LOG_SRC, 'Extension installée/mise à jour');
-  chrome.storage.sync.get(['webhookUrl', 'hotkey'], (result) => {
-    if (!result.webhookUrl) {
-      chrome.storage.sync.set(DEFAULT_CONFIG);
-      VTTLogger.info(LOG_SRC, 'Configuration par défaut appliquée');
+if (typeof chrome !== 'undefined' && chrome.runtime) {
+  chrome.runtime.onInstalled.addListener(() => {
+    VTTLogger.info(LOG_SRC, 'Extension installée/mise à jour');
+    chrome.storage.sync.get(['webhookUrl', 'hotkey'], (result) => {
+      if (!result.webhookUrl) {
+        chrome.storage.sync.set(DEFAULT_CONFIG);
+        VTTLogger.info(LOG_SRC, 'Configuration par défaut appliquée');
+      }
+    });
+    updateBadge('idle');
+  });
+
+  // Au démarrage du service worker
+  VTTLogger.info(LOG_SRC, 'Service worker démarré', {
+    sessionId: VTTLogger.getSessionId()
+  });
+
+  // Écoute des commandes clavier
+  chrome.commands.onCommand.addListener((command) => {
+    VTTLogger.info(LOG_SRC, `Commande reçue: ${command}`);
+    if (command === 'toggle-recording') {
+      toggleRecording();
     }
   });
-  updateBadge('idle');
-});
 
-// Au démarrage du service worker
-VTTLogger.info(LOG_SRC, 'Service worker démarré', {
-  sessionId: VTTLogger.getSessionId()
-});
-
-// Écoute des commandes clavier
-chrome.commands.onCommand.addListener((command) => {
-  VTTLogger.info(LOG_SRC, `Commande reçue: ${command}`);
-  if (command === 'toggle-recording') {
-    toggleRecording();
-  }
-});
-
-// Écoute des messages du popup et content script
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  // Écoute des messages du popup et content script
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const tabId = sender.tab?.id || 'popup';
   VTTLogger.debug(LOG_SRC, `Message reçu: ${message.action}`, { tabId, action: message.action });
 
@@ -69,10 +75,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         audioSize: message.audioBase64?.length || 0,
         tabId: sender.tab?.id
       });
+      // Sauvegarder l'ID de l'onglet AVANT de réinitialiser l'état
+      const tabIdToProcess = sender.tab?.id || recordingTabId;
       // Réinitialiser l'état d'enregistrement
       isRecording = false;
       recordingStartTime = null;
-      processAudio(message.audioBase64, sender.tab?.id || recordingTabId);
+      recordingTabId = null;
+      isToggleProcessing = false;
+      processAudio(message.audioBase64, tabIdToProcess);
       sendResponse({ success: true });
       break;
 
@@ -84,6 +94,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       isRecording = false;
       recordingStartTime = null;
       recordingTabId = null;
+      isToggleProcessing = false;
       updateBadge('error');
       setTimeout(() => updateBadge('idle'), 3000);
       sendResponse({ success: true });
@@ -96,6 +107,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       isRecording = true;
       recordingStartTime = Date.now();
       recordingTabId = sender.tab?.id;
+      isToggleProcessing = false;
       updateBadge('recording');
       sendResponse({ success: true });
       break;
@@ -125,11 +137,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ success: true });
       break;
   }
-});
+  });
+}
 
 // Basculer l'état d'enregistrement
 async function toggleRecording() {
   VTTLogger.info(LOG_SRC, `toggleRecording appelé, état actuel: ${isRecording}`);
+
+  if (isToggleProcessing) {
+    VTTLogger.warn(LOG_SRC, 'Déjà en train de traiter un toggle, ignoré');
+    return;
+  }
+
+  isToggleProcessing = true;
 
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -193,8 +213,7 @@ async function toggleRecording() {
           minDuration: minDuration
         });
         // L'état sera mis à jour quand on recevra 'recording-started'
-        // Mais on initialise quand même au cas où le message de confirmation n'arrive pas
-        recordingTabId = tab.id;
+        // Ne PAS initialiser recordingTabId ici
       } catch (error) {
         VTTLogger.error(LOG_SRC, 'Erreur envoi start-recording', {
           error: error.message,
@@ -208,6 +227,8 @@ async function toggleRecording() {
     VTTLogger.logError(LOG_SRC, error, 'toggleRecording');
     updateBadge('error');
     setTimeout(() => updateBadge('idle'), 3000);
+  } finally {
+    isToggleProcessing = false;
   }
 }
 
@@ -372,4 +393,15 @@ function updateBadge(status) {
   chrome.action.setBadgeBackgroundColor({ color: badge.color });
 
   VTTLogger.debug(LOG_SRC, `Badge mis à jour: ${status}`);
+}
+
+// Export pour les tests
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = {
+    toggleRecording,
+    processAudio,
+    updateBadge,
+    buildHeaders,
+    testConnection
+  };
 }
