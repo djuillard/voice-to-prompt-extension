@@ -8,6 +8,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const authPasswordInput = document.getElementById('authPassword');
   const minDurationInput = document.getElementById('minDuration');
   const hotkeyInput = document.getElementById('hotkey');
+  const testModeInput = document.getElementById('testMode');
   const testBtn = document.getElementById('testBtn');
   const testResult = document.getElementById('testResult');
   const saveBtn = document.getElementById('saveBtn');
@@ -30,7 +31,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Charger la configuration depuis le storage
   function loadConfig() {
-    chrome.storage.sync.get(['webhookUrl', 'authUsername', 'authPassword', 'minDuration', 'hotkey'], (result) => {
+    chrome.storage.sync.get(['webhookUrl', 'authUsername', 'authPassword', 'minDuration', 'hotkey', 'testMode'], (result) => {
       if (result.webhookUrl) {
         webhookUrlInput.value = result.webhookUrl;
       }
@@ -46,6 +47,9 @@ document.addEventListener('DOMContentLoaded', () => {
       if (result.hotkey) {
         hotkeyInput.value = result.hotkey;
       }
+      if (result.testMode !== undefined) {
+        testModeInput.checked = result.testMode;
+      }
     });
   }
 
@@ -55,25 +59,30 @@ document.addEventListener('DOMContentLoaded', () => {
     const authUsername = authUsernameInput.value.trim();
     const authPassword = authPasswordInput.value;
     const minDuration = parseFloat(minDurationInput.value) || 1;
+    const testMode = testModeInput.checked;
 
-    if (!webhookUrl) {
-      showTestResult('Veuillez entrer une URL de webhook', false);
+    // En mode test, l'URL du webhook est optionnelle
+    if (!webhookUrl && !testMode) {
+      showTestResult('Veuillez entrer une URL de webhook ou activer le mode test', false);
       return;
     }
 
-    // Valider l'URL
-    try {
-      new URL(webhookUrl);
-    } catch {
-      showTestResult('URL invalide', false);
-      return;
+    // Valider l'URL si fournie
+    if (webhookUrl) {
+      try {
+        new URL(webhookUrl);
+      } catch {
+        showTestResult('URL invalide', false);
+        return;
+      }
     }
 
     chrome.storage.sync.set({
       webhookUrl: webhookUrl,
       authUsername: authUsername,
       authPassword: authPassword,
-      minDuration: minDuration
+      minDuration: minDuration,
+      testMode: testMode
     }, () => {
       saveBtn.textContent = 'Sauvegardé!';
       saveBtn.classList.add('saved');

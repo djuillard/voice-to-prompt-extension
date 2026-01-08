@@ -197,6 +197,44 @@ h1 {
   margin-top: 6px;
 }
 
+.checkbox-group {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px;
+  background: rgba(255, 193, 7, 0.1);
+  border: 1px solid rgba(255, 193, 7, 0.3);
+  border-radius: 8px;
+  margin-top: 8px;
+}
+
+.checkbox-group input[type="checkbox"] {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  cursor: pointer;
+  accent-color: #ffc107;
+  margin-top: 2px;
+}
+
+.checkbox-label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  cursor: pointer;
+  flex-grow: 1;
+}
+
+.checkbox-label span:first-child {
+  font-weight: 500;
+  color: #ffc107;
+  font-size: 14px;
+}
+
+.checkbox-label span.hint {
+  margin-top: 0;
+}
+
 .test-btn {
   margin-top: 8px;
   background: transparent;
