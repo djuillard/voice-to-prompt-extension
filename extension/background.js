@@ -18,6 +18,9 @@ const DEFAULT_CONFIG = {
   testMode: false // Mode test : enregistre sans envoyer au webhook
 };
 
+// Historique des prompts
+const PROMPTS_STORAGE_KEY = 'vtt_prompts_history';
+
 // Initialisation
 chrome.runtime.onInstalled.addListener(() => {
   VTTLogger.info(LOG_SRC, 'Extension installée/mise à jour');
@@ -262,6 +265,28 @@ async function processAudio(audioBase64, tabId) {
       // Texte de test basé sur la taille de l'audio
       const testText = `[Mode Test] Audio enregistré (${Math.round(audioBase64.length / 1024)}KB). Ceci est un texte de test pour vérifier que l'enregistrement fonctionne correctement.`;
 
+      // Sauvegarder le prompt de test dans l'historique
+      const prompt = {
+        id: Date.now().toString(36),
+        text: testText,
+        timestamp: new Date().toISOString(),
+        length: testText.length,
+        tabId: tabId,
+        processingTimeMs: 1000,
+        audioSizeKB: Math.round(audioBase64.length / 1024),
+        isTest: true
+      };
+
+      chrome.storage.local.get([PROMPTS_STORAGE_KEY]).then(result => {
+        const prompts = result[PROMPTS_STORAGE_KEY] || [];
+        prompts.unshift(prompt);
+        chrome.storage.local.set({ [PROMPTS_STORAGE_KEY]: prompts });
+        VTTLogger.info(LOG_SRC, 'Prompt test sauvegardé dans historique', {
+          promptId: prompt.id,
+          totalPrompts: prompts.length
+        });
+      });
+
       // Injecter le texte de test
       if (testText) {
         VTTLogger.info(LOG_SRC, 'Injection du texte de test', {
@@ -328,6 +353,27 @@ async function processAudio(audioBase64, tabId) {
     const cleanedText = result.cleanedText || result.text || '';
 
     if (cleanedText) {
+      // Sauvegarder le prompt dans l'historique AVANT l'injection
+      const prompt = {
+        id: Date.now().toString(36),
+        text: cleanedText,
+        timestamp: new Date().toISOString(),
+        length: cleanedText.length,
+        tabId: tabId,
+        processingTimeMs: responseTime,
+        audioSizeKB: Math.round(audioBase64.length / 1024)
+      };
+
+      chrome.storage.local.get([PROMPTS_STORAGE_KEY]).then(result => {
+        const prompts = result[PROMPTS_STORAGE_KEY] || [];
+        prompts.unshift(prompt); // Plus récents en premier
+        chrome.storage.local.set({ [PROMPTS_STORAGE_KEY]: prompts });
+        VTTLogger.info(LOG_SRC, 'Prompt sauvegardé dans historique', {
+          promptId: prompt.id,
+          totalPrompts: prompts.length
+        });
+      });
+
       VTTLogger.info(LOG_SRC, 'Injection du texte', {
         textLength: cleanedText.length,
         tabId

@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Voice to Text - Historique</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #1a1a2e;
+      color: #eee;
+      min-height: 100vh;
+      padding: 20px;
+    }
+
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 20px;
+      padding-bottom: 20px;
+      border-bottom: 1px solid #333;
+    }
+
+    h1 {
+      font-size: 24px;
+      color: #667eea;
+    }
+
+    .actions {
+      display: flex;
+      gap: 10px;
+    }
+
+    button {
+      background: #667eea;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 14px;
+      transition: background 0.2s;
+    }
+
+    button:hover {
+      background: #5a6fd6;
+    }
+
+    button.danger {
+      background: #e74c3c;
+    }
+
+    button.danger:hover {
+      background: #c0392b;
+    }
+
+    button.refresh-btn {
+      background: transparent;
+      border: 1px solid #667eea;
+      color: #667eea;
+      padding: 8px 16px;
+    }
+
+    button.refresh-btn:hover {
+      background: rgba(102, 126, 234, 0.1);
+    }
+
+    .stats {
+      display: flex;
+      gap: 20px;
+      margin-bottom: 20px;
+      flex-wrap: wrap;
+    }
+
+    .stat {
+      background: #2a2a4a;
+      padding: 15px 20px;
+      border-radius: 8px;
+      min-width: 150px;
+    }
+
+    .stat-value {
+      font-size: 24px;
+      font-weight: bold;
+      color: #667eea;
+    }
+
+    .stat-label {
+      font-size: 12px;
+      color: #888;
+      margin-top: 4px;
+    }
+
+    .view-toggle {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 20px;
+    }
+
+    .view-toggle label {
+      color: #888;
+      font-size: 14px;
+    }
+
+    .view-toggle input[type="checkbox"] {
+      width: 18px;
+      height: 18px;
+      accent-color: #667eea;
+      cursor: pointer;
+    }
+
+    .search-container {
+      margin-bottom: 20px;
+    }
+
+    .search-input {
+      width: 100%;
+      background: #2a2a4a;
+      border: 1px solid #444;
+      color: #eee;
+      padding: 12px 16px;
+      border-radius: 8px;
+      font-size: 14px;
+    }
+
+    .search-input:focus {
+      outline: none;
+      border-color: #667eea;
+    }
+
+    .prompts-container {
+      background: #2a2a4a;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    .prompt-entry {
+      padding: 16px;
+      border-bottom: 1px solid #3a3a5a;
+      transition: background 0.2s;
+    }
+
+    .prompt-entry:hover {
+      background: #333;
+    }
+
+    .prompt-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+      gap: 12px;
+    }
+
+    .prompt-timestamp {
+      color: #888;
+      font-size: 12px;
+    }
+
+    .prompt-actions {
+      display: flex;
+      gap: 8px;
+    }
+
+    .copy-btn, .delete-btn {
+      background: transparent;
+      border: none;
+      cursor: pointer;
+      padding: 6px 12px;
+      border-radius: 4px;
+      font-size: 14px;
+      transition: all 0.2s;
+    }
+
+    .copy-btn:hover {
+      background: rgba(68, 255, 68, 0.2);
+    }
+
+    .delete-btn:hover {
+      background: rgba(231, 76, 60, 0.2);
+    }
+
+    .prompt-content {
+      color: #eee;
+      font-size: 14px;
+      line-height: 1.6;
+      margin-bottom: 12px;
+      padding: 12px;
+      background: #1a1a2e;
+      border-radius: 6px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .prompt-meta {
+      display: flex;
+      gap: 16px;
+      font-size: 12px;
+      color: #666;
+      flex-wrap: wrap;
+    }
+
+    .prompt-meta span {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .see-more-btn {
+      background: transparent;
+      border: 1px solid #667eea;
+      color: #667eea;
+      cursor: pointer;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 12px;
+      transition: all 0.2s;
+    }
+
+    .see-more-btn:hover {
+      background: rgba(102, 126, 234, 0.1);
+    }
+
+    .empty-state {
+      text-align: center;
+      padding: 60px 20px;
+      color: #666;
+    }
+
+    .empty-state svg {
+      width: 64px;
+      height: 64px;
+      margin-bottom: 16px;
+      opacity: 0.5;
+    }
+
+    .notification {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      background: #4CAF50;
+      color: white;
+      padding: 12px 24px;
+      border-radius: 8px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: 14px;
+      box-shadow: 0 4px 12px rgba(76, 175, 80, 0.4);
+      animation: slideIn 0.3s ease-out;
+      z-index: 2147483647;
+    }
+
+    @keyframes slideIn {
+      from { transform: translateX(100%); opacity: 0; }
+      to { transform: translateX(0); opacity: 1; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Historique des Prompts</h1>
+      <div class="actions">
+        <button id="exportBtn" class="refresh-btn">Exporter (.txt)</button>
+        <button id="clearBtn" class="danger">Effacer tout</button>
+      </div>
+    </header>
+
+    <div class="stats">
+      <div class="stat">
+        <div class="stat-value" id="totalPrompts">0</div>
+        <div class="stat-label">Total prompts</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value" id="lastPrompt">-</div>
+        <div class="stat-label">Dernier prompt</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value" id="totalChars">0</div>
+        <div class="stat-label">Caractères totaux</div>
+      </div>
+    </div>
+
+    <div class="search-container">
+      <input type="text" id="searchInput" class="search-input" placeholder="Rechercher dans les prompts...">
+    </div>
+
+    <div class="prompts-container" id="promptsContainer">
+      <div class="empty-state">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 0 2h12a2 2 0 0 0 0 2-2V8z"></path>
+          <polyline points="14 2 14 8 20 8"></polyline>
+          <line x1="16" y1="13" x2="8" y2="13"></line>
+          <line x1="16" y1="17" x2="8" y2="17"></line>
+          <polyline points="10 9 9 9 8 9"></polyline>
+        </svg>
+        <p>Aucun prompt sauvegardé</p>
+      </div>
+    </div>
+  </div>
+
+  <script src="prompts.js"></script>
+</body>
+</html>

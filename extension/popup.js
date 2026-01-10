@@ -14,6 +14,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const saveBtn = document.getElementById('saveBtn');
   const recordBtn = document.getElementById('recordBtn');
   const logsBtn = document.getElementById('logsBtn');
+  const promptsBtn = document.getElementById('promptsBtn');
   const statusEl = document.getElementById('status');
   const statusText = statusEl.querySelector('.status-text');
 
@@ -28,6 +29,7 @@ document.addEventListener('DOMContentLoaded', () => {
   testBtn.addEventListener('click', testConnection);
   recordBtn.addEventListener('click', toggleRecording);
   logsBtn.addEventListener('click', openLogs);
+  promptsBtn.addEventListener('click', openPrompts);
 
   // Charger la configuration depuis le storage
   function loadConfig() {
@@ -174,6 +176,11 @@ document.addEventListener('DOMContentLoaded', () => {
   // Ouvrir la page des logs
   function openLogs() {
     chrome.tabs.create({ url: chrome.runtime.getURL('logs.html') });
+  }
+
+  // Ouvrir la page des prompts
+  function openPrompts() {
+    chrome.tabs.create({ url: chrome.runtime.getURL('prompts.html') });
   }
 
   // Actualiser le statut périodiquement
