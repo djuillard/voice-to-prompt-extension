@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Voice to Text - n8n",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Capture vocale avec transcription via n8n et Mistral AI",
   "permissions": [
     "storage",
@@ -45,7 +45,7 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["lame.min.js", "logs.html", "logs.js"],
+      "resources": ["lame.min.js", "logs.html", "logs.js", "prompts.html", "prompts.js"],
       "matches": ["<all_urls>"]
     }
   ]
