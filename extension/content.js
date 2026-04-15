@@ -133,6 +133,23 @@ async function startRecording() {
     return;
   }
 
+  // Fail fast: si lamejs n'est pas chargé, pas la peine d'enregistrer
+  if (typeof lamejs === 'undefined') {
+    const err = new Error('lamejs non chargé - veuillez recharger la page');
+    ContentLogger.error('lamejs non disponible au démarrage');
+    try {
+      chrome.runtime.sendMessage({ action: 'recording-error', error: err.message });
+    } catch (e) { /* ignore */ }
+    showNotification(err.message, 'error');
+    throw err;
+  }
+
+  // Nettoyer d'éventuelles ressources orphelines d'un précédent enregistrement
+  if (mediaStream || audioContext || scriptProcessor) {
+    ContentLogger.warn('Ressources audio orphelines détectées, nettoyage préalable');
+    await cleanupRecording();
+  }
+
   try {
     ContentLogger.debug('Demande accès microphone...');
 
@@ -180,7 +197,11 @@ async function startRecording() {
     showNotification('Enregistrement en cours...', 'info');
 
     // Confirmer au background que l'enregistrement a bien démarré
-    chrome.runtime.sendMessage({ action: 'recording-started' });
+    try {
+      chrome.runtime.sendMessage({ action: 'recording-started' });
+    } catch (e) {
+      ContentLogger.warn('Impossible d\'envoyer recording-started', { error: e.message });
+    }
 
     ContentLogger.info('Enregistrement démarré avec succès');
 
@@ -195,29 +216,32 @@ async function startRecording() {
     await cleanupRecording();
 
     // Informer le background de l'erreur
-    chrome.runtime.sendMessage({
-      action: 'recording-error',
-      error: error.message
-    });
+    try {
+      chrome.runtime.sendMessage({
+        action: 'recording-error',
+        error: error.message
+      });
+    } catch (e) { /* ignore */ }
 
     showNotification(`Erreur microphone: ${error.message}`, 'error');
     throw error;
   }
 }
 
-// Nettoyer les ressources d'enregistrement
+// Nettoyer les ressources d'enregistrement (idempotent, safe à appeler plusieurs fois)
 async function cleanupRecording() {
   ContentLogger.debug('Nettoyage des ressources d\'enregistrement');
 
   // Annuler le timeout de sécurité
   if (recordingTimeout) {
-    clearTimeout(recordingTimeout);
+    try { clearTimeout(recordingTimeout); } catch (e) { /* ignore */ }
     recordingTimeout = null;
   }
 
   // Déconnecter le processeur audio
   if (scriptProcessor) {
     try {
+      scriptProcessor.onaudioprocess = null;
       scriptProcessor.disconnect();
     } catch (e) {
       ContentLogger.debug('scriptProcessor déjà déconnecté');
@@ -239,23 +263,25 @@ async function cleanupRecording() {
 
   // Arrêter les pistes du microphone (IMPORTANT pour l'icône micro)
   if (mediaStream) {
-    const tracks = mediaStream.getTracks();
-    ContentLogger.debug('Arrêt des pistes média', { tracksCount: tracks.length });
-
-    for (const track of tracks) {
-      track.stop();
-      ContentLogger.debug('Piste arrêtée', {
-        kind: track.kind,
-        label: track.label,
-        readyState: track.readyState
-      });
+    try {
+      const tracks = mediaStream.getTracks ? mediaStream.getTracks() : [];
+      ContentLogger.debug('Arrêt des pistes média', { tracksCount: tracks.length });
+      for (const track of tracks) {
+        try {
+          track.stop();
+        } catch (e) { /* ignore */ }
+      }
+    } catch (e) {
+      ContentLogger.debug('Erreur lors de l\'arrêt des pistes', { error: e.message });
     }
     mediaStream = null;
   }
 
-  hideRecordingIndicator();
+  try { hideRecordingIndicator(); } catch (e) { /* ignore */ }
   isRecording = false;
   recordingStartTime = null;
+  // NE PAS vider audioChunks ici: stopRecording a besoin d'y accéder après cleanup.
+  // audioChunks est réinitialisé au prochain startRecording().
 
   ContentLogger.info('Ressources nettoyées');
 }
@@ -292,11 +318,13 @@ async function stopRecording() {
     });
     await cleanupRecording();
     showNotification(`Enregistrement trop court (< ${minSeconds}s), ignoré`, 'info');
-    // Informer le background que l'enregistrement est annulé (pas d'audio à traiter)
-    chrome.runtime.sendMessage({
-      action: 'recording-error',
-      error: `Enregistrement trop court (< ${minSeconds} seconde${minSeconds > 1 ? 's' : ''})`
-    });
+    // Annulation non fatale (pas une vraie erreur): utiliser recording-cancelled
+    try {
+      chrome.runtime.sendMessage({
+        action: 'recording-cancelled',
+        reason: `Enregistrement trop court (< ${minSeconds} seconde${minSeconds > 1 ? 's' : ''})`
+      });
+    } catch (e) { /* ignore */ }
     return;
   }
 
@@ -328,12 +356,19 @@ async function stopRecording() {
 
     // Envoyer au background script
     ContentLogger.info('Envoi au background script...');
-    chrome.runtime.sendMessage({
-      action: 'recording-stopped',
-      audioBase64: mp3Base64
-    }, (response) => {
-      ContentLogger.debug('Réponse du background', { response });
-    });
+    try {
+      const sendPromise = chrome.runtime.sendMessage({
+        action: 'recording-stopped',
+        audioBase64: mp3Base64
+      });
+      if (sendPromise && typeof sendPromise.then === 'function') {
+        sendPromise
+          .then((response) => ContentLogger.debug('Réponse du background', { response }))
+          .catch((err) => ContentLogger.error('Erreur envoi recording-stopped', { error: err.message }));
+      }
+    } catch (e) {
+      ContentLogger.error('Erreur envoi recording-stopped (sync)', { error: e.message });
+    }
 
     showNotification('Traitement en cours...', 'info');
 
@@ -346,10 +381,12 @@ async function stopRecording() {
     showNotification(`Erreur encodage: ${error.message}`, 'error');
 
     // Informer le background de l'erreur
-    chrome.runtime.sendMessage({
-      action: 'recording-error',
-      error: error.message
-    });
+    try {
+      chrome.runtime.sendMessage({
+        action: 'recording-error',
+        error: error.message
+      });
+    } catch (e) { /* ignore */ }
   }
 }
 
@@ -653,3 +690,22 @@ window.addEventListener('unload', () => {
     cleanupRecording();
   }
 });
+
+// Exports pour les tests (Jest / CommonJS)
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = {
+    ContentLogger,
+    startRecording,
+    stopRecording,
+    cleanupRecording,
+    encodeToMP3,
+    injectText,
+    isEditableElement,
+    findFirstEditableField,
+    isVisible,
+    insertTextAtCursor,
+    showNotification,
+    showRecordingIndicator,
+    hideRecordingIndicator
+  };
+}

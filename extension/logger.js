@@ -165,7 +165,13 @@ const VTTLogger = {
   }
 };
 
-// Export pour les modules ES ou rendre global
+// Rendre disponible globalement pour les service workers (importScripts)
+// et pour jsdom/jest (ou tout autre contexte globalThis)
+if (typeof globalThis !== 'undefined') {
+  globalThis.VTTLogger = VTTLogger;
+}
+
+// Export pour les modules CommonJS (Jest)
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = VTTLogger;
 }
