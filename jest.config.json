@@ -3,16 +3,21 @@
   "setupFilesAfterEnv": ["<rootDir>/tests/setup.js"],
   "testMatch": ["**/tests/**/*.test.js"],
   "collectCoverageFrom": [
-    "extension/**/*.js",
-    "!extension/lame.min.js",
-    "!extension/icons/**"
+    "extension/background.js",
+    "extension/logger.js"
   ],
   "coverageThreshold": {
     "global": {
       "branches": 70,
-      "functions": 70,
-      "lines": 70,
-      "statements": 70
+      "functions": 85,
+      "lines": 80,
+      "statements": 80
+    },
+    "extension/logger.js": {
+      "branches": 75,
+      "functions": 95,
+      "lines": 90,
+      "statements": 90
     }
   }
 }

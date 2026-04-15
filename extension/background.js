@@ -1,55 +1,182 @@
 // Voice to Text - Background Service Worker
 // Gère l'enregistrement audio et la communication avec n8n
 
-importScripts('logger.js');
+// importScripts n'existe que dans le service worker, pas dans Jest/jsdom
+if (typeof importScripts !== 'undefined') {
+  try {
+    importScripts('logger.js');
+  } catch (e) {
+    console.error('[VTT] Erreur chargement logger:', e);
+  }
+}
+
+// En environnement de test (Jest), logger.js est chargé via require avant ce fichier
+// et VTTLogger est attaché à globalThis. On récupère une référence locale.
+const Logger = (typeof VTTLogger !== 'undefined')
+  ? VTTLogger
+  : (typeof globalThis !== 'undefined' && globalThis.VTTLogger)
+    ? globalThis.VTTLogger
+    : require('./logger.js');
 
 const LOG_SRC = 'Background';
 
-let isRecording = false;
-let recordingTabId = null;
-let recordingStartTime = null;
-let isToggleProcessing = false;
+// État global (peut être perdu si le service worker redémarre)
+const state = {
+  isRecording: false,
+  recordingTabId: null,
+  recordingStartTime: null,
+  isToggleProcessing: false,
+  watchdogTimer: null,
+  lockTimer: null
+};
 
 // Configuration par défaut
 const DEFAULT_CONFIG = {
   webhookUrl: '',
   hotkey: 'Ctrl+Shift+V',
-  minDuration: 1, // Durée minimum en secondes
-  testMode: false // Mode test : enregistre sans envoyer au webhook
+  minDuration: 1,
+  testMode: false
 };
 
-// Historique des prompts
+// Constantes
 const PROMPTS_STORAGE_KEY = 'vtt_prompts_history';
+const STATE_STORAGE_KEY = 'vtt_recording_state';
+const MAX_PROMPTS_HISTORY = 200;
+const TOGGLE_LOCK_TIMEOUT = 10000;  // 10s: libération de sécurité du lock
+const START_ACK_TIMEOUT = 4000;     // 4s max pour que le content script confirme le démarrage
 
-// Initialisation
+// Préfixes d'URLs où les content scripts ne peuvent PAS être injectés
+const RESTRICTED_URL_PATTERNS = [
+  /^chrome:\/\//i,
+  /^chrome-extension:\/\//i,
+  /^edge:\/\//i,
+  /^about:/i,
+  /^devtools:\/\//i,
+  /^view-source:/i,
+  /^file:\/\//i,
+  /chrome\.google\.com\/webstore/i,
+  /chromewebstore\.google\.com/i
+];
+
+function isRestrictedUrl(url) {
+  if (!url) return true;
+  return RESTRICTED_URL_PATTERNS.some(p => p.test(url));
+}
+
+// ---------- Persistance de l'état ----------
+
+function getSessionStorage() {
+  // chrome.storage.session est préférable (ephémère, MV3), fallback local
+  if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.session) {
+    return chrome.storage.session;
+  }
+  return chrome.storage.local;
+}
+
+async function persistState() {
+  try {
+    const snapshot = {
+      isRecording: state.isRecording,
+      recordingTabId: state.recordingTabId,
+      recordingStartTime: state.recordingStartTime
+    };
+    await getSessionStorage().set({ [STATE_STORAGE_KEY]: snapshot });
+  } catch (e) {
+    // Non critique
+  }
+}
+
+async function loadPersistedState() {
+  try {
+    const result = await getSessionStorage().get([STATE_STORAGE_KEY]);
+    const persisted = result[STATE_STORAGE_KEY];
+    if (persisted) {
+      state.isRecording = !!persisted.isRecording;
+      state.recordingTabId = persisted.recordingTabId || null;
+      state.recordingStartTime = persisted.recordingStartTime || null;
+      Logger.info(LOG_SRC, 'État restauré depuis storage', snapshot());
+    }
+  } catch (e) {
+    Logger.error(LOG_SRC, 'Erreur chargement état persisté', { error: e.message });
+  }
+}
+
+function snapshot() {
+  return {
+    isRecording: state.isRecording,
+    recordingTabId: state.recordingTabId,
+    recordingStartTime: state.recordingStartTime,
+    isToggleProcessing: state.isToggleProcessing
+  };
+}
+
+function clearTimers() {
+  if (state.watchdogTimer) {
+    clearTimeout(state.watchdogTimer);
+    state.watchdogTimer = null;
+  }
+  if (state.lockTimer) {
+    clearTimeout(state.lockTimer);
+    state.lockTimer = null;
+  }
+}
+
+async function resetState(badgeStatus) {
+  clearTimers();
+  state.isRecording = false;
+  state.recordingTabId = null;
+  state.recordingStartTime = null;
+  state.isToggleProcessing = false;
+  await persistState();
+  if (badgeStatus) {
+    updateBadge(badgeStatus);
+    if (badgeStatus === 'error') {
+      setTimeout(() => updateBadge('idle'), 3000);
+    }
+  }
+}
+
+function releaseLockSoon() {
+  if (state.lockTimer) clearTimeout(state.lockTimer);
+  state.lockTimer = setTimeout(() => {
+    Logger.warn(LOG_SRC, 'Lock toggleRecording libéré par timeout de sécurité');
+    state.isToggleProcessing = false;
+    state.lockTimer = null;
+  }, TOGGLE_LOCK_TIMEOUT);
+}
+
+// ---------- Initialisation ----------
+
 chrome.runtime.onInstalled.addListener(() => {
-  VTTLogger.info(LOG_SRC, 'Extension installée/mise à jour');
+  Logger.info(LOG_SRC, 'Extension installée/mise à jour');
   chrome.storage.sync.get(['webhookUrl', 'hotkey'], (result) => {
     if (!result.webhookUrl) {
       chrome.storage.sync.set(DEFAULT_CONFIG);
-      VTTLogger.info(LOG_SRC, 'Configuration par défaut appliquée');
+      Logger.info(LOG_SRC, 'Configuration par défaut appliquée');
     }
   });
   updateBadge('idle');
 });
 
-// Au démarrage du service worker
-VTTLogger.info(LOG_SRC, 'Service worker démarré', {
-  sessionId: VTTLogger.getSessionId()
+Logger.info(LOG_SRC, 'Service worker démarré', {
+  sessionId: Logger.getSessionId()
 });
 
-// Écoute des commandes clavier
+// Charger état persistant (recouvrement après restart SW)
+loadPersistedState();
+
+// ---------- Écoutes ----------
+
 chrome.commands.onCommand.addListener((command) => {
-  VTTLogger.info(LOG_SRC, `Commande reçue: ${command}`);
+  Logger.info(LOG_SRC, `Commande reçue: ${command}`);
   if (command === 'toggle-recording') {
     toggleRecording();
   }
 });
 
-// Écoute des messages du popup et content script
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const tabId = sender.tab?.id || 'popup';
-  VTTLogger.debug(LOG_SRC, `Message reçu: ${message.action}`, { tabId, action: message.action });
+  Logger.debug(LOG_SRC, `Message reçu: ${message.action}`, { tabId, action: message.action });
 
   switch (message.action) {
     case 'toggle-recording':
@@ -59,9 +186,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     case 'get-status':
       sendResponse({
-        isRecording,
-        recordingTabId,
-        recordingDuration: recordingStartTime ? Date.now() - recordingStartTime : 0
+        isRecording: state.isRecording,
+        recordingTabId: state.recordingTabId,
+        recordingDuration: state.recordingStartTime ? Date.now() - state.recordingStartTime : 0
       });
       break;
 
@@ -69,58 +196,78 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       testConnection(message.url, message.username, message.password).then(sendResponse);
       return true;
 
-    case 'recording-stopped':
-      VTTLogger.info(LOG_SRC, 'Audio reçu du content script', {
-        audioSize: message.audioBase64?.length || 0,
-        tabId: sender.tab?.id
-      });
-      // Réinitialiser l'état d'enregistrement
-      isRecording = false;
-      recordingStartTime = null;
-      processAudio(message.audioBase64, sender.tab?.id || recordingTabId);
-      sendResponse({ success: true });
-      break;
-
-    case 'recording-error':
-      VTTLogger.error(LOG_SRC, 'Erreur enregistrement du content script', {
-        error: message.error,
-        tabId: sender.tab?.id
-      });
-      isRecording = false;
-      recordingStartTime = null;
-      recordingTabId = null;
-      updateBadge('error');
-      setTimeout(() => updateBadge('idle'), 3000);
-      sendResponse({ success: true });
-      break;
-
     case 'recording-started':
-      VTTLogger.info(LOG_SRC, 'Enregistrement démarré confirmé par content script', {
+      Logger.info(LOG_SRC, 'Enregistrement confirmé par content script', {
         tabId: sender.tab?.id
       });
-      isRecording = true;
-      recordingStartTime = Date.now();
-      recordingTabId = sender.tab?.id;
+      if (state.watchdogTimer) {
+        clearTimeout(state.watchdogTimer);
+        state.watchdogTimer = null;
+      }
+      state.isRecording = true;
+      state.recordingStartTime = Date.now();
+      state.recordingTabId = sender.tab?.id ?? state.recordingTabId;
+      state.isToggleProcessing = false;
+      if (state.lockTimer) {
+        clearTimeout(state.lockTimer);
+        state.lockTimer = null;
+      }
+      persistState();
       updateBadge('recording');
       sendResponse({ success: true });
       break;
 
+    case 'recording-stopped': {
+      Logger.info(LOG_SRC, 'Audio reçu du content script', {
+        audioSize: message.audioBase64?.length || 0,
+        tabId: sender.tab?.id
+      });
+      clearTimers();
+      // Sauvegarder l'ID AVANT de réinitialiser l'état
+      const tabIdToProcess = sender.tab?.id || state.recordingTabId;
+      state.isRecording = false;
+      state.recordingStartTime = null;
+      state.recordingTabId = null;
+      state.isToggleProcessing = false;
+      persistState();
+      processAudio(message.audioBase64, tabIdToProcess);
+      sendResponse({ success: true });
+      break;
+    }
+
+    case 'recording-cancelled':
+      Logger.info(LOG_SRC, 'Enregistrement annulé (non fatal)', {
+        reason: message.reason,
+        tabId: sender.tab?.id
+      });
+      resetState('idle');
+      sendResponse({ success: true });
+      break;
+
+    case 'recording-error':
+      Logger.error(LOG_SRC, 'Erreur enregistrement du content script', {
+        error: message.error,
+        tabId: sender.tab?.id
+      });
+      resetState('error');
+      sendResponse({ success: true });
+      break;
+
     case 'get-logs':
-      VTTLogger.getLogs().then(logs => sendResponse({ logs }));
+      Logger.getLogs().then(logs => sendResponse({ logs }));
       return true;
 
     case 'clear-logs':
-      VTTLogger.clearLogs().then(() => sendResponse({ success: true }));
+      Logger.clearLogs().then(() => sendResponse({ success: true }));
       return true;
 
     case 'export-logs':
-      VTTLogger.exportLogs().then(text => sendResponse({ text }));
+      Logger.exportLogs().then(text => sendResponse({ text }));
       return true;
 
     case 'log-entry':
-      // Recevoir les logs du content script
       if (message.entry) {
-        VTTLogger.log(
+        Logger.log(
           message.entry.level,
           message.entry.source || 'Content',
           message.entry.message,
@@ -132,111 +279,139 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 
-// Basculer l'état d'enregistrement
+// ---------- Logique principale ----------
+
 async function toggleRecording() {
-  VTTLogger.info(LOG_SRC, `toggleRecording appelé, état actuel: ${isRecording}`);
+  Logger.info(LOG_SRC, 'toggleRecording appelé', snapshot());
+
+  // Protection anti-concurrence: ignorer les appels en parallèle
+  if (state.isToggleProcessing) {
+    Logger.warn(LOG_SRC, 'toggleRecording ignoré (opération déjà en cours)');
+    return;
+  }
+
+  state.isToggleProcessing = true;
+  releaseLockSoon();
 
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
     if (!tab) {
-      VTTLogger.error(LOG_SRC, 'Aucun onglet actif trouvé');
+      Logger.error(LOG_SRC, 'Aucun onglet actif trouvé');
+      await resetState('error');
       return;
     }
 
-    VTTLogger.debug(LOG_SRC, 'Onglet actif trouvé', { tabId: tab.id, url: tab.url });
+    Logger.debug(LOG_SRC, 'Onglet actif trouvé', { tabId: tab.id, url: tab.url });
 
-    if (isRecording) {
-      // Arrêter l'enregistrement
-      const duration = recordingStartTime ? Date.now() - recordingStartTime : 0;
-      VTTLogger.info(LOG_SRC, 'Arrêt de l\'enregistrement demandé', {
-        tabId: recordingTabId,
+    // Vérifier si l'URL permet l'injection d'un content script
+    if (isRestrictedUrl(tab.url)) {
+      Logger.warn(LOG_SRC, 'Page restreinte, content script indisponible', { url: tab.url });
+      try {
+        await chrome.notifications?.create?.({
+          type: 'basic',
+          iconUrl: 'icons/icon48.png',
+          title: 'Voice to Text',
+          message: "Impossible d'enregistrer sur cette page (chrome://, Web Store ou extension)."
+        });
+      } catch (e) { /* ignore si chrome.notifications indispo */ }
+      await resetState('error');
+      return;
+    }
+
+    if (state.isRecording) {
+      // === Arrêt de l'enregistrement ===
+      const duration = state.recordingStartTime ? Date.now() - state.recordingStartTime : 0;
+      const targetTabId = state.recordingTabId || tab.id;
+
+      Logger.info(LOG_SRC, 'Arrêt de l\'enregistrement demandé', {
+        tabId: targetTabId,
         currentTabId: tab.id,
         duration
       });
 
-      // IMPORTANT: Marquer comme arrêté IMMÉDIATEMENT pour éviter les doubles déclenchements
-      const targetTabId = recordingTabId || tab.id;
-      isRecording = false;
-      recordingStartTime = null;
-
       try {
         await chrome.tabs.sendMessage(targetTabId, { action: 'stop-recording' });
-        VTTLogger.info(LOG_SRC, 'Message stop-recording envoyé', { targetTabId });
+        Logger.info(LOG_SRC, 'Message stop-recording envoyé', { targetTabId });
         updateBadge('processing');
+        // Le lock sera libéré à la réception de recording-stopped / cancelled / error.
       } catch (error) {
-        VTTLogger.error(LOG_SRC, 'Erreur envoi stop-recording', {
+        Logger.error(LOG_SRC, 'Erreur envoi stop-recording, reset complet', {
           error: error.message,
           targetTabId
         });
-        // Réinitialiser complètement l'état en cas d'erreur
-        recordingTabId = null;
-        updateBadge('idle');
+        await resetState('error');
       }
-
     } else {
-      // Vérifier la configuration
+      // === Démarrage de l'enregistrement ===
       const config = await chrome.storage.sync.get(['webhookUrl', 'minDuration', 'testMode']);
-      VTTLogger.debug(LOG_SRC, 'Config vérifiée', {
+      Logger.debug(LOG_SRC, 'Config vérifiée', {
         hasWebhook: !!config.webhookUrl,
         testMode: !!config.testMode,
         minDuration: config.minDuration
       });
 
       if (!config.webhookUrl && !config.testMode) {
-        VTTLogger.warn(LOG_SRC, 'Webhook non configuré et mode test désactivé');
-        chrome.tabs.sendMessage(tab.id, {
-          action: 'show-error',
-          message: 'Veuillez configurer l\'URL du webhook n8n ou activer le mode test dans les paramètres de l\'extension.'
-        });
+        Logger.warn(LOG_SRC, 'Webhook non configuré et mode test désactivé');
+        try {
+          await chrome.tabs.sendMessage(tab.id, {
+            action: 'show-error',
+            message: 'Veuillez configurer l\'URL du webhook n8n ou activer le mode test dans les paramètres de l\'extension.'
+          });
+        } catch (e) { /* ignore */ }
+        await resetState('idle');
         return;
       }
 
-      // Démarrer l'enregistrement
       const minDuration = config.minDuration !== undefined ? config.minDuration : DEFAULT_CONFIG.minDuration;
-      VTTLogger.info(LOG_SRC, 'Démarrage enregistrement demandé', { tabId: tab.id, minDuration });
+      Logger.info(LOG_SRC, 'Démarrage enregistrement demandé', { tabId: tab.id, minDuration });
 
       try {
         await chrome.tabs.sendMessage(tab.id, {
           action: 'start-recording',
           minDuration: minDuration
         });
-        // L'état sera mis à jour quand on recevra 'recording-started'
-        // Mais on initialise quand même au cas où le message de confirmation n'arrive pas
-        recordingTabId = tab.id;
+        // Mémoriser l'onglet même avant l'ack pour permettre un stop en cas d'ack manquant
+        state.recordingTabId = tab.id;
+        await persistState();
+
+        // Watchdog: si aucun ack après START_ACK_TIMEOUT, reset propre
+        if (state.watchdogTimer) clearTimeout(state.watchdogTimer);
+        state.watchdogTimer = setTimeout(async () => {
+          if (!state.isRecording) {
+            Logger.warn(LOG_SRC, 'Aucun ack recording-started reçu, reset');
+            await resetState('error');
+          }
+          state.watchdogTimer = null;
+        }, START_ACK_TIMEOUT);
       } catch (error) {
-        VTTLogger.error(LOG_SRC, 'Erreur envoi start-recording', {
+        Logger.error(LOG_SRC, 'Erreur envoi start-recording', {
           error: error.message,
           tabId: tab.id
         });
-        updateBadge('error');
-        setTimeout(() => updateBadge('idle'), 3000);
+        await resetState('error');
       }
     }
   } catch (error) {
-    VTTLogger.logError(LOG_SRC, error, 'toggleRecording');
-    updateBadge('error');
-    setTimeout(() => updateBadge('idle'), 3000);
+    Logger.logError(LOG_SRC, error, 'toggleRecording');
+    await resetState('error');
   }
 }
 
-// Construire les headers avec Basic Auth si configuré
+// Construire les headers HTTP
 function buildHeaders(username, password) {
   const headers = {
     'Content-Type': 'application/json'
   };
-
   if (username && password) {
-    const credentials = btoa(`${username}:${password}`);
-    headers['Authorization'] = `Basic ${credentials}`;
+    headers['Authorization'] = `Basic ${btoa(`${username}:${password}`)}`;
   }
-
   return headers;
 }
 
 // Traiter l'audio enregistré
 async function processAudio(audioBase64, tabId) {
-  VTTLogger.info(LOG_SRC, 'processAudio démarré', {
+  Logger.info(LOG_SRC, 'processAudio démarré', {
     audioSize: audioBase64?.length || 0,
     tabId
   });
@@ -249,7 +424,7 @@ async function processAudio(audioBase64, tabId) {
     }
 
     const config = await chrome.storage.sync.get(['webhookUrl', 'authUsername', 'authPassword', 'testMode']);
-    VTTLogger.debug(LOG_SRC, 'Config récupérée pour envoi', {
+    Logger.debug(LOG_SRC, 'Config récupérée pour envoi', {
       hasWebhook: !!config.webhookUrl,
       hasAuth: !!(config.authUsername && config.authPassword),
       testMode: !!config.testMode
@@ -257,53 +432,20 @@ async function processAudio(audioBase64, tabId) {
 
     // Mode test : simuler une transcription
     if (config.testMode) {
-      VTTLogger.info(LOG_SRC, 'Mode test activé, simulation de transcription');
-
-      // Simuler un délai de traitement
+      Logger.info(LOG_SRC, 'Mode test activé, simulation de transcription');
       await new Promise(resolve => setTimeout(resolve, 1000));
 
-      // Texte de test basé sur la taille de l'audio
       const testText = `[Mode Test] Audio enregistré (${Math.round(audioBase64.length / 1024)}KB). Ceci est un texte de test pour vérifier que l'enregistrement fonctionne correctement.`;
 
-      // Sauvegarder le prompt de test dans l'historique
-      const prompt = {
-        id: Date.now().toString(36),
+      await savePromptToHistory({
         text: testText,
-        timestamp: new Date().toISOString(),
-        length: testText.length,
-        tabId: tabId,
+        tabId,
         processingTimeMs: 1000,
         audioSizeKB: Math.round(audioBase64.length / 1024),
         isTest: true
-      };
-
-      chrome.storage.local.get([PROMPTS_STORAGE_KEY]).then(result => {
-        const prompts = result[PROMPTS_STORAGE_KEY] || [];
-        prompts.unshift(prompt);
-        chrome.storage.local.set({ [PROMPTS_STORAGE_KEY]: prompts });
-        VTTLogger.info(LOG_SRC, 'Prompt test sauvegardé dans historique', {
-          promptId: prompt.id,
-          totalPrompts: prompts.length
-        });
       });
 
-      // Injecter le texte de test
-      if (testText) {
-        VTTLogger.info(LOG_SRC, 'Injection du texte de test', {
-          textLength: testText.length,
-          tabId
-        });
-
-        chrome.tabs.sendMessage(tabId, {
-          action: 'inject-text',
-          text: testText
-        });
-        updateBadge('success');
-        setTimeout(() => updateBadge('idle'), 2000);
-      } else {
-        throw new Error('Erreur lors de la simulation du texte de test');
-      }
-
+      injectTextOrNotify(tabId, testText);
       return;
     }
 
@@ -311,8 +453,7 @@ async function processAudio(audioBase64, tabId) {
       throw new Error('URL du webhook non configurée');
     }
 
-    // Envoyer l'audio au webhook n8n
-    VTTLogger.info(LOG_SRC, 'Envoi vers webhook...', {
+    Logger.info(LOG_SRC, 'Envoi vers webhook...', {
       url: config.webhookUrl.substring(0, 50) + '...',
       audioSizeKB: Math.round(audioBase64.length / 1024)
     });
@@ -328,7 +469,7 @@ async function processAudio(audioBase64, tabId) {
     });
 
     const responseTime = Date.now() - startTime;
-    VTTLogger.info(LOG_SRC, 'Réponse webhook reçue', {
+    Logger.info(LOG_SRC, 'Réponse webhook reçue', {
       status: response.status,
       ok: response.ok,
       responseTimeMs: responseTime
@@ -339,7 +480,7 @@ async function processAudio(audioBase64, tabId) {
     }
 
     const result = await response.json();
-    VTTLogger.info(LOG_SRC, 'Résultat JSON parsé', {
+    Logger.info(LOG_SRC, 'Résultat JSON parsé', {
       hasCleanedText: !!result.cleanedText,
       hasText: !!result.text,
       hasError: !!result.error
@@ -349,66 +490,81 @@ async function processAudio(audioBase64, tabId) {
       throw new Error(result.error);
     }
 
-    // Envoyer le texte nettoyé au content script pour injection
     const cleanedText = result.cleanedText || result.text || '';
-
-    if (cleanedText) {
-      // Sauvegarder le prompt dans l'historique AVANT l'injection
-      const prompt = {
-        id: Date.now().toString(36),
-        text: cleanedText,
-        timestamp: new Date().toISOString(),
-        length: cleanedText.length,
-        tabId: tabId,
-        processingTimeMs: responseTime,
-        audioSizeKB: Math.round(audioBase64.length / 1024)
-      };
-
-      chrome.storage.local.get([PROMPTS_STORAGE_KEY]).then(result => {
-        const prompts = result[PROMPTS_STORAGE_KEY] || [];
-        prompts.unshift(prompt); // Plus récents en premier
-        chrome.storage.local.set({ [PROMPTS_STORAGE_KEY]: prompts });
-        VTTLogger.info(LOG_SRC, 'Prompt sauvegardé dans historique', {
-          promptId: prompt.id,
-          totalPrompts: prompts.length
-        });
-      });
-
-      VTTLogger.info(LOG_SRC, 'Injection du texte', {
-        textLength: cleanedText.length,
-        tabId
-      });
-
-      chrome.tabs.sendMessage(tabId, {
-        action: 'inject-text',
-        text: cleanedText
-      });
-      updateBadge('success');
-      setTimeout(() => updateBadge('idle'), 2000);
-    } else {
+    if (!cleanedText) {
       throw new Error('Aucun texte reçu du serveur');
     }
 
+    await savePromptToHistory({
+      text: cleanedText,
+      tabId,
+      processingTimeMs: responseTime,
+      audioSizeKB: Math.round(audioBase64.length / 1024)
+    });
+
+    injectTextOrNotify(tabId, cleanedText);
+
   } catch (error) {
-    VTTLogger.logError(LOG_SRC, error, 'processAudio');
+    Logger.logError(LOG_SRC, error, 'processAudio');
 
     if (tabId) {
-      chrome.tabs.sendMessage(tabId, {
-        action: 'show-error',
-        message: `Erreur: ${error.message}`
-      });
+      try {
+        await chrome.tabs.sendMessage(tabId, {
+          action: 'show-error',
+          message: `Erreur: ${error.message}`
+        });
+      } catch (e) {
+        // Content script peut-être indisponible (navigation, tab fermé)
+      }
     }
     updateBadge('error');
     setTimeout(() => updateBadge('idle'), 3000);
-  } finally {
-    // S'assurer que l'état est bien réinitialisé
-    recordingTabId = null;
+  }
+}
+
+function injectTextOrNotify(tabId, text) {
+  Logger.info(LOG_SRC, 'Injection du texte', { textLength: text.length, tabId });
+  if (tabId) {
+    try {
+      chrome.tabs.sendMessage(tabId, {
+        action: 'inject-text',
+        text: text
+      });
+    } catch (e) {
+      Logger.error(LOG_SRC, 'Erreur envoi inject-text', { error: e.message });
+    }
+  }
+  updateBadge('success');
+  setTimeout(() => updateBadge('idle'), 2000);
+}
+
+async function savePromptToHistory(prompt) {
+  const entry = {
+    id: Date.now().toString(36),
+    timestamp: new Date().toISOString(),
+    length: prompt.text.length,
+    ...prompt
+  };
+  try {
+    const result = await chrome.storage.local.get([PROMPTS_STORAGE_KEY]);
+    const prompts = result[PROMPTS_STORAGE_KEY] || [];
+    prompts.unshift(entry);
+    if (prompts.length > MAX_PROMPTS_HISTORY) {
+      prompts.length = MAX_PROMPTS_HISTORY;
+    }
+    await chrome.storage.local.set({ [PROMPTS_STORAGE_KEY]: prompts });
+    Logger.info(LOG_SRC, 'Prompt sauvegardé dans historique', {
+      promptId: entry.id,
+      totalPrompts: prompts.length
+    });
+  } catch (e) {
+    Logger.error(LOG_SRC, 'Erreur sauvegarde prompt', { error: e.message });
   }
 }
 
 // Tester la connexion au webhook
 async function testConnection(url, username, password) {
-  VTTLogger.info(LOG_SRC, 'Test connexion webhook', {
+  Logger.info(LOG_SRC, 'Test connexion webhook', {
     url: url?.substring(0, 50) + '...',
     hasAuth: !!(username && password)
   });
@@ -431,11 +587,10 @@ async function testConnection(url, username, password) {
           `Erreur HTTP: ${response.status}`
     };
 
-    VTTLogger.info(LOG_SRC, 'Résultat test connexion', result);
+    Logger.info(LOG_SRC, 'Résultat test connexion', result);
     return result;
-
   } catch (error) {
-    VTTLogger.logError(LOG_SRC, error, 'testConnection');
+    Logger.logError(LOG_SRC, error, 'testConnection');
     return { success: false, message: `Erreur de connexion: ${error.message}` };
   }
 }
@@ -451,8 +606,26 @@ function updateBadge(status) {
   };
 
   const badge = badges[status] || badges.idle;
-  chrome.action.setBadgeText({ text: badge.text });
-  chrome.action.setBadgeBackgroundColor({ color: badge.color });
+  try {
+    chrome.action.setBadgeText({ text: badge.text });
+    chrome.action.setBadgeBackgroundColor({ color: badge.color });
+  } catch (e) {
+    // chrome.action peut ne pas être disponible dans certains contextes de test
+  }
+  Logger.debug(LOG_SRC, `Badge mis à jour: ${status}`);
+}
 
-  VTTLogger.debug(LOG_SRC, `Badge mis à jour: ${status}`);
+// Exports pour les tests (Jest / CommonJS)
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = {
+    toggleRecording,
+    processAudio,
+    updateBadge,
+    buildHeaders,
+    testConnection,
+    isRestrictedUrl,
+    savePromptToHistory,
+    resetState,
+    _state: state
+  };
 }
