@@ -21,6 +21,74 @@ const DEFAULT_CONFIG = {
 // Historique des prompts
 const PROMPTS_STORAGE_KEY = 'vtt_prompts_history';
 
+// Clé de persistance pour détecter les requêtes interrompues par la suspension du SW
+const INFLIGHT_STORAGE_KEY = 'vtt_inflight';
+
+// Timeout réseau pour le webhook (le SW MV3 peut être tué après ~30s de fetch en attente,
+// le keepalive ci-dessous l'évite ; ce timeout protège contre un webhook qui hang).
+const WEBHOOK_TIMEOUT_MS = 90_000;
+
+// Keepalive du service worker pendant un fetch long (MV3).
+// Une promesse fetch en attente ne maintient PAS le SW vivant — il faut un événement périodique.
+const KEEPALIVE_ALARM = 'vtt-keepalive';
+let keepAliveIntervalId = null;
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  // No-op : le simple fait que ce handler s'exécute réveille le SW.
+  if (alarm.name === KEEPALIVE_ALARM) return;
+});
+
+function startKeepAlive() {
+  chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.5 });
+  if (!keepAliveIntervalId) {
+    keepAliveIntervalId = setInterval(() => {
+      chrome.runtime.getPlatformInfo().catch(() => { });
+    }, 20_000);
+  }
+  VTTLogger.debug(LOG_SRC, 'Keepalive SW démarré');
+}
+
+function stopKeepAlive() {
+  chrome.alarms.clear(KEEPALIVE_ALARM);
+  if (keepAliveIntervalId) {
+    clearInterval(keepAliveIntervalId);
+    keepAliveIntervalId = null;
+  }
+  VTTLogger.debug(LOG_SRC, 'Keepalive SW arrêté');
+}
+
+// Décode une chaîne base64 en Uint8Array en une seule passe.
+function base64ToUint8Array(base64) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+// Au démarrage du SW, détecter une éventuelle requête in-flight orpheline.
+chrome.storage.session.get(INFLIGHT_STORAGE_KEY).then((result) => {
+  const inflight = result[INFLIGHT_STORAGE_KEY];
+  if (!inflight) return;
+
+  const elapsedSec = Math.round((Date.now() - inflight.startedAt) / 1000);
+  VTTLogger.warn(LOG_SRC, 'Requête in-flight détectée au démarrage du SW (probable suspension)', {
+    ...inflight,
+    elapsedSec
+  });
+  chrome.storage.session.remove(INFLIGHT_STORAGE_KEY);
+
+  if (inflight.tabId) {
+    chrome.tabs.sendMessage(inflight.tabId, {
+      action: 'show-error',
+      message: `Transcription perdue (extension redémarrée après ${elapsedSec}s). Réessaie ton enregistrement.`
+    }).catch(() => { /* onglet fermé */ });
+  }
+  updateBadge('error');
+  setTimeout(() => updateBadge('idle'), 5000);
+});
+
 // Initialisation
 chrome.runtime.onInstalled.addListener(() => {
   VTTLogger.info(LOG_SRC, 'Extension installée/mise à jour');
@@ -241,6 +309,9 @@ async function processAudio(audioBase64, tabId) {
     tabId
   });
 
+  let keepAliveStarted = false;
+  let inflightPersisted = false;
+
   try {
     updateBadge('processing');
 
@@ -311,21 +382,64 @@ async function processAudio(audioBase64, tabId) {
       throw new Error('URL du webhook non configurée');
     }
 
-    // Envoyer l'audio au webhook n8n
+    // Décoder le base64 en bytes une seule fois, puis emballer en multipart.
+    // Évite JSON.stringify d'un gros base64 (+33% taille) et permet à n8n
+    // de consommer directement le fichier binaire.
+    const mp3Bytes = base64ToUint8Array(audioBase64);
+    const audioSizeKB = Math.round(mp3Bytes.byteLength / 1024);
+    const mp3Blob = new Blob([mp3Bytes], { type: 'audio/mpeg' });
+
+    const formData = new FormData();
+    formData.append('audio', mp3Blob, 'recording.mp3');
+    formData.append('timestamp', new Date().toISOString());
+
+    // Persister l'état in-flight pour détecter les SW killés pendant l'upload.
+    const inflight = {
+      tabId,
+      startedAt: Date.now(),
+      audioSizeKB,
+      url: config.webhookUrl
+    };
+    await chrome.storage.session.set({ [INFLIGHT_STORAGE_KEY]: inflight });
+    inflightPersisted = true;
+
+    // Démarrer le keepalive AVANT le fetch — sinon le SW peut être suspendu
+    // pendant l'upload/traitement (les promesses pendantes ne comptent pas comme activité).
+    startKeepAlive();
+    keepAliveStarted = true;
+
+    // Authentification optionnelle (FormData gère le Content-Type lui-même).
+    const headers = {};
+    if (config.authUsername && config.authPassword) {
+      headers['Authorization'] = `Basic ${btoa(`${config.authUsername}:${config.authPassword}`)}`;
+    }
+
     VTTLogger.info(LOG_SRC, 'Envoi vers webhook...', {
       url: config.webhookUrl.substring(0, 50) + '...',
-      audioSizeKB: Math.round(audioBase64.length / 1024)
+      audioSizeKB,
+      timeoutMs: WEBHOOK_TIMEOUT_MS
     });
 
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), WEBHOOK_TIMEOUT_MS);
+
+    let response;
     const startTime = Date.now();
-    const response = await fetch(config.webhookUrl, {
-      method: 'POST',
-      headers: buildHeaders(config.authUsername, config.authPassword),
-      body: JSON.stringify({
-        audio: audioBase64,
-        timestamp: new Date().toISOString()
-      })
-    });
+    try {
+      response = await fetch(config.webhookUrl, {
+        method: 'POST',
+        headers,
+        body: formData,
+        signal: controller.signal
+      });
+    } catch (fetchError) {
+      if (fetchError.name === 'AbortError') {
+        throw new Error(`Timeout webhook (${WEBHOOK_TIMEOUT_MS / 1000}s) — le serveur n'a pas répondu à temps`);
+      }
+      throw fetchError;
+    } finally {
+      clearTimeout(timeoutId);
+    }
 
     const responseTime = Date.now() - startTime;
     VTTLogger.info(LOG_SRC, 'Réponse webhook reçue', {
@@ -361,7 +475,7 @@ async function processAudio(audioBase64, tabId) {
         length: cleanedText.length,
         tabId: tabId,
         processingTimeMs: responseTime,
-        audioSizeKB: Math.round(audioBase64.length / 1024)
+        audioSizeKB
       };
 
       chrome.storage.local.get([PROMPTS_STORAGE_KEY]).then(result => {
@@ -396,12 +510,15 @@ async function processAudio(audioBase64, tabId) {
       chrome.tabs.sendMessage(tabId, {
         action: 'show-error',
         message: `Erreur: ${error.message}`
-      });
+      }).catch(() => { /* onglet fermé */ });
     }
     updateBadge('error');
     setTimeout(() => updateBadge('idle'), 3000);
   } finally {
-    // S'assurer que l'état est bien réinitialisé
+    if (keepAliveStarted) stopKeepAlive();
+    if (inflightPersisted) {
+      await chrome.storage.session.remove(INFLIGHT_STORAGE_KEY).catch(() => { });
+    }
     recordingTabId = null;
   }
 }

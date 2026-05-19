@@ -6,9 +6,7 @@
         "httpMethod": "POST",
         "path": "voice-to-text",
         "responseMode": "responseNode",
-        "options": {
-          "rawBody": true
-        }
+        "options": {}
       },
       "id": "a1b2c3d4-webhook",
       "name": "Webhook",
@@ -60,7 +58,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Recuperer l'audio en base64 depuis le webhook\nconst audioBase64 = $input.first().json.body.audio;\n\nif (!audioBase64) {\n  throw new Error('Aucune donnee audio recue');\n}\n\nreturn [{\n  json: {\n    audioBase64: audioBase64,\n    timestamp: $input.first().json.body.timestamp || new Date().toISOString()\n  },\n  binary: {\n    data: await this.helpers.prepareBinaryData(\n      Buffer.from(audioBase64, 'base64'),\n      'recording.mp3',\n      'audio/mpeg'\n    )\n  }\n}];"
+        "jsCode": "// Recuperer l'audio depuis le webhook.\n// L'extension >= 1.3.0 envoie en multipart/form-data (champ \"audio\").\n// Les versions anterieures envoyaient un JSON base64 (champ body.audio).\nconst input = $input.first();\nlet audioBuffer;\nlet timestamp;\n\nif (input.binary && input.binary.audio) {\n  // Multipart : n8n a deja attache le fichier sous binary.audio\n  audioBuffer = await this.helpers.getBinaryDataBuffer(0, 'audio');\n  timestamp = input.json.body && input.json.body.timestamp\n    ? input.json.body.timestamp\n    : new Date().toISOString();\n} else if (input.json.body && input.json.body.audio) {\n  // Legacy : base64 dans le JSON\n  audioBuffer = Buffer.from(input.json.body.audio, 'base64');\n  timestamp = input.json.body.timestamp || new Date().toISOString();\n} else {\n  throw new Error('Aucune donnee audio recue (ni binary.audio ni body.audio)');\n}\n\nreturn [{\n  json: {\n    timestamp,\n    audioSizeKB: Math.round(audioBuffer.length / 1024)\n  },\n  binary: {\n    data: await this.helpers.prepareBinaryData(\n      audioBuffer,\n      'recording.mp3',\n      'audio/mpeg'\n    )\n  }\n}];"
       },
       "id": "a1b2c3d4-prepare",
       "name": "Prepare Audio",

@@ -1,12 +1,13 @@
 {
   "manifest_version": 3,
   "name": "Voice to Text - n8n",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Capture vocale avec transcription via n8n et Mistral AI",
   "permissions": [
     "storage",
     "activeTab",
-    "scripting"
+    "scripting",
+    "alarms"
   ],
   "host_permissions": [
     "<all_urls>"
