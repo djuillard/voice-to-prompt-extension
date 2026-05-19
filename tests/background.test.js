@@ -59,6 +59,7 @@ describe('Background Script - Recording State Management', () => {
     updateBadge = backgroundScript.updateBadge;
     buildHeaders = backgroundScript.buildHeaders;
     testConnection = backgroundScript.testConnection;
+    global._backgroundModule = backgroundScript;
   });
 
   afterEach(() => {
@@ -87,7 +88,7 @@ describe('Background Script - Recording State Management', () => {
   });
 
   describe('ProcessAudio', () => {
-    it('devrait envoyer l\'audio au webhook', async () => {
+    it('devrait envoyer l\'audio au webhook en multipart/form-data', async () => {
       const audioBase64 = 'dGVzdC1hdWRpbw==';
 
       await processAudio(audioBase64, 1);
@@ -96,7 +97,8 @@ describe('Background Script - Recording State Management', () => {
         'https://test-n8n.com/webhook',
         expect.objectContaining({
           method: 'POST',
-          body: expect.stringContaining('"audio":"dGVzdC1hdWRpbw=="')
+          body: expect.any(FormData),
+          signal: expect.any(AbortSignal)
         })
       );
     });
@@ -444,6 +446,303 @@ describe('Background Script - Recording State Management', () => {
         1,
         expect.objectContaining({ action: 'start-recording' })
       );
+    });
+  });
+
+  describe('Fiabilité - URLs restreintes', () => {
+    it('devrait détecter chrome:// comme restreinte', () => {
+      const { isRestrictedUrl } = global._backgroundModule;
+      expect(isRestrictedUrl('chrome://extensions')).toBe(true);
+    });
+
+    it('devrait détecter chrome-extension:// comme restreinte', () => {
+      const { isRestrictedUrl } = global._backgroundModule;
+      expect(isRestrictedUrl('chrome-extension://abc/popup.html')).toBe(true);
+    });
+
+    it('devrait détecter le Chrome Web Store comme restreinte', () => {
+      const { isRestrictedUrl } = global._backgroundModule;
+      expect(isRestrictedUrl('https://chrome.google.com/webstore/foo')).toBe(true);
+      expect(isRestrictedUrl('https://chromewebstore.google.com/category/xyz')).toBe(true);
+    });
+
+    it('devrait considérer about:blank comme restreinte', () => {
+      const { isRestrictedUrl } = global._backgroundModule;
+      expect(isRestrictedUrl('about:blank')).toBe(true);
+    });
+
+    it('devrait accepter une URL https normale', () => {
+      const { isRestrictedUrl } = global._backgroundModule;
+      expect(isRestrictedUrl('https://example.com/page')).toBe(false);
+    });
+
+    it('devrait considérer une URL null comme restreinte', () => {
+      const { isRestrictedUrl } = global._backgroundModule;
+      expect(isRestrictedUrl(null)).toBe(true);
+      expect(isRestrictedUrl(undefined)).toBe(true);
+      expect(isRestrictedUrl('')).toBe(true);
+    });
+
+    it('devrait refuser d\'enregistrer sur une page restreinte', async () => {
+      chrome.tabs.query.mockResolvedValue([{ id: 1, url: 'chrome://extensions' }]);
+      chrome.tabs.sendMessage.mockResolvedValue({ success: true });
+
+      await toggleRecording();
+
+      expect(chrome.tabs.sendMessage).not.toHaveBeenCalledWith(
+        1,
+        expect.objectContaining({ action: 'start-recording' })
+      );
+      // Badge en erreur
+      expect(chrome.action.setBadgeText).toHaveBeenCalledWith({ text: '!' });
+    });
+  });
+
+  describe('Fiabilité - Lock anti-concurrence', () => {
+    it('devrait ignorer un second toggleRecording pendant qu\'un premier est en cours', async () => {
+      // Simuler un délai dans la réponse de sendMessage
+      let resolveFirst;
+      chrome.tabs.sendMessage.mockImplementation(() => new Promise((resolve) => {
+        resolveFirst = resolve;
+      }));
+
+      const p1 = toggleRecording();
+      const p2 = toggleRecording(); // Devrait être ignoré (lock actif)
+
+      // Laisser l'event loop avancer
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // Un seul sendMessage de type start-recording envoyé
+      const startCalls = chrome.tabs.sendMessage.mock.calls.filter(
+        c => c[1] && c[1].action === 'start-recording'
+      );
+      expect(startCalls.length).toBe(1);
+
+      resolveFirst({ success: true });
+      await p1;
+      await p2;
+    });
+  });
+
+  describe('Fiabilité - processAudio race condition', () => {
+    it('devrait utiliser le tabId passé même quand l\'état a été réinitialisé', async () => {
+      // Simule le scénario où processAudio est appelé avec un tabId après un reset
+      await processAudio('dGVzdA==', 42);
+
+      expect(chrome.tabs.sendMessage).toHaveBeenCalledWith(
+        42,
+        expect.objectContaining({ action: 'inject-text' })
+      );
+    });
+
+    it('devrait limiter l\'historique des prompts à 200', async () => {
+      const { savePromptToHistory } = global._backgroundModule;
+      const existing = Array(200).fill(null).map((_, i) => ({ id: `${i}`, text: `t${i}` }));
+      chrome.storage.local.get.mockResolvedValue({ vtt_prompts_history: existing });
+      chrome.storage.local.set.mockClear();
+
+      await savePromptToHistory({ text: 'nouveau', tabId: 1, processingTimeMs: 10, audioSizeKB: 1 });
+
+      // Chercher l'appel qui contient vtt_prompts_history
+      const historyCall = chrome.storage.local.set.mock.calls.find(
+        c => c[0] && c[0].vtt_prompts_history
+      );
+      expect(historyCall).toBeDefined();
+      expect(historyCall[0].vtt_prompts_history.length).toBe(200);
+      expect(historyCall[0].vtt_prompts_history[0].text).toBe('nouveau'); // En tête
+    });
+  });
+
+  describe('Fiabilité - Reset state', () => {
+    it('devrait réinitialiser tous les champs d\'état', async () => {
+      const { resetState, _state } = global._backgroundModule;
+
+      _state.isRecording = true;
+      _state.recordingTabId = 42;
+      _state.recordingStartTime = Date.now();
+      _state.isToggleProcessing = true;
+
+      await resetState('idle');
+
+      expect(_state.isRecording).toBe(false);
+      expect(_state.recordingTabId).toBe(null);
+      expect(_state.recordingStartTime).toBe(null);
+      expect(_state.isToggleProcessing).toBe(false);
+    });
+  });
+
+  describe('Message listener - onMessage handlers', () => {
+    let messageListener;
+
+    beforeEach(() => {
+      messageListener = chrome.runtime.onMessage.addListener.mock.calls[0][0];
+    });
+
+    it('devrait traiter get-status', () => {
+      const sendResponse = jest.fn();
+      messageListener({ action: 'get-status' }, { tab: { id: 1 } }, sendResponse);
+      expect(sendResponse).toHaveBeenCalledWith(
+        expect.objectContaining({
+          isRecording: expect.any(Boolean),
+          recordingDuration: expect.any(Number)
+        })
+      );
+    });
+
+    it('devrait traiter recording-started', () => {
+      const { _state } = global._backgroundModule;
+      _state.isRecording = false;
+      const sendResponse = jest.fn();
+
+      messageListener({ action: 'recording-started' }, { tab: { id: 42 } }, sendResponse);
+
+      expect(_state.isRecording).toBe(true);
+      expect(_state.recordingTabId).toBe(42);
+      expect(_state.isToggleProcessing).toBe(false);
+      expect(sendResponse).toHaveBeenCalledWith({ success: true });
+    });
+
+    it('devrait traiter recording-stopped et lancer processAudio', async () => {
+      const { _state } = global._backgroundModule;
+      _state.isRecording = true;
+      _state.recordingTabId = 42;
+      const sendResponse = jest.fn();
+
+      messageListener(
+        { action: 'recording-stopped', audioBase64: 'dGVzdA==' },
+        { tab: { id: 42 } },
+        sendResponse
+      );
+
+      expect(_state.isRecording).toBe(false);
+      expect(_state.recordingTabId).toBe(null);
+      expect(sendResponse).toHaveBeenCalledWith({ success: true });
+    });
+
+    it('devrait traiter recording-cancelled sans badge d\'erreur', async () => {
+      const { _state } = global._backgroundModule;
+      _state.isRecording = true;
+      _state.recordingTabId = 42;
+      const sendResponse = jest.fn();
+      chrome.action.setBadgeText.mockClear();
+
+      messageListener(
+        { action: 'recording-cancelled', reason: 'Trop court' },
+        { tab: { id: 42 } },
+        sendResponse
+      );
+
+      // resetState est async, flusher les microtâches
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(_state.isRecording).toBe(false);
+      expect(chrome.action.setBadgeText).toHaveBeenCalledWith({ text: '' }); // idle, pas '!'
+      expect(sendResponse).toHaveBeenCalledWith({ success: true });
+    });
+
+    it('devrait traiter recording-error et afficher badge error', async () => {
+      const { _state } = global._backgroundModule;
+      _state.isRecording = true;
+      _state.recordingTabId = 42;
+      const sendResponse = jest.fn();
+
+      messageListener(
+        { action: 'recording-error', error: 'Microphone refusé' },
+        { tab: { id: 42 } },
+        sendResponse
+      );
+
+      // resetState est async, flusher les microtâches
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(_state.isRecording).toBe(false);
+      expect(chrome.action.setBadgeText).toHaveBeenCalledWith({ text: '!' });
+      expect(sendResponse).toHaveBeenCalledWith({ success: true });
+    });
+
+    it('devrait traiter log-entry du content script', () => {
+      const sendResponse = jest.fn();
+      chrome.storage.local.get.mockResolvedValue({ vtt_logs: [] });
+
+      messageListener(
+        {
+          action: 'log-entry',
+          entry: { level: 'INFO', source: 'Content', message: 'Test', data: null }
+        },
+        {},
+        sendResponse
+      );
+
+      expect(sendResponse).toHaveBeenCalledWith({ success: true });
+    });
+
+    it('devrait traiter toggle-recording via message', () => {
+      chrome.tabs.sendMessage.mockResolvedValue({ success: true });
+      const sendResponse = jest.fn();
+
+      messageListener({ action: 'toggle-recording' }, { tab: { id: 1 } }, sendResponse);
+
+      expect(sendResponse).toHaveBeenCalledWith({ success: true });
+    });
+
+    it('devrait retourner true pour test-connection (async)', () => {
+      const sendResponse = jest.fn();
+      const result = messageListener(
+        { action: 'test-connection', url: 'https://test.com', username: '', password: '' },
+        {},
+        sendResponse
+      );
+      expect(result).toBe(true); // Indique réponse asynchrone
+    });
+
+    it('devrait retourner true pour get-logs (async)', () => {
+      const sendResponse = jest.fn();
+      const result = messageListener({ action: 'get-logs' }, {}, sendResponse);
+      expect(result).toBe(true);
+    });
+
+    it('devrait retourner true pour clear-logs (async)', () => {
+      const sendResponse = jest.fn();
+      const result = messageListener({ action: 'clear-logs' }, {}, sendResponse);
+      expect(result).toBe(true);
+    });
+
+    it('devrait retourner true pour export-logs (async)', () => {
+      const sendResponse = jest.fn();
+      const result = messageListener({ action: 'export-logs' }, {}, sendResponse);
+      expect(result).toBe(true);
+    });
+  });
+
+  describe('Commands listener', () => {
+    it('devrait déclencher toggleRecording sur la commande toggle-recording', () => {
+      const commandListener = chrome.commands.onCommand.addListener.mock.calls[0][0];
+      chrome.tabs.sendMessage.mockResolvedValue({ success: true });
+
+      // Ne devrait pas throw
+      expect(() => commandListener('toggle-recording')).not.toThrow();
+    });
+
+    it('devrait ignorer les commandes inconnues', () => {
+      const commandListener = chrome.commands.onCommand.addListener.mock.calls[0][0];
+      expect(() => commandListener('unknown-command')).not.toThrow();
+    });
+  });
+
+  describe('onInstalled handler', () => {
+    it('devrait appliquer la config par défaut si webhookUrl absent', () => {
+      const onInstalledListener = chrome.runtime.onInstalled.addListener.mock.calls[0][0];
+      chrome.storage.sync.get.mockImplementationOnce((keys, cb) => {
+        cb({});
+        return Promise.resolve({});
+      });
+
+      onInstalledListener();
+
+      expect(chrome.storage.sync.set).toHaveBeenCalled();
     });
   });
 });
