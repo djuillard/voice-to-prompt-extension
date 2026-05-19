@@ -88,7 +88,7 @@ describe('Background Script - Recording State Management', () => {
   });
 
   describe('ProcessAudio', () => {
-    it('devrait envoyer l\'audio au webhook', async () => {
+    it('devrait envoyer l\'audio au webhook en multipart/form-data', async () => {
       const audioBase64 = 'dGVzdC1hdWRpbw==';
 
       await processAudio(audioBase64, 1);
@@ -97,7 +97,8 @@ describe('Background Script - Recording State Management', () => {
         'https://test-n8n.com/webhook',
         expect.objectContaining({
           method: 'POST',
-          body: expect.stringContaining('"audio":"dGVzdC1hdWRpbw=="')
+          body: expect.any(FormData),
+          signal: expect.any(AbortSignal)
         })
       );
     });

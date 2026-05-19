@@ -41,9 +41,54 @@ const DEFAULT_CONFIG = {
 // Constantes
 const PROMPTS_STORAGE_KEY = 'vtt_prompts_history';
 const STATE_STORAGE_KEY = 'vtt_recording_state';
+const INFLIGHT_STORAGE_KEY = 'vtt_inflight';
 const MAX_PROMPTS_HISTORY = 200;
 const TOGGLE_LOCK_TIMEOUT = 10000;  // 10s: libération de sécurité du lock
 const START_ACK_TIMEOUT = 4000;     // 4s max pour que le content script confirme le démarrage
+const WEBHOOK_TIMEOUT_MS = 90_000;  // Timeout réseau du webhook (protège contre un n8n qui hang)
+
+// Keepalive du service worker pendant un fetch long (MV3).
+// Une promesse fetch en attente ne maintient PAS le SW vivant — il faut un événement périodique.
+const KEEPALIVE_ALARM = 'vtt-keepalive';
+let keepAliveIntervalId = null;
+
+if (typeof chrome !== 'undefined' && chrome.alarms && chrome.alarms.onAlarm) {
+  chrome.alarms.onAlarm.addListener((alarm) => {
+    // No-op : le simple fait que ce handler s'exécute réveille le SW.
+    if (alarm.name === KEEPALIVE_ALARM) return;
+  });
+}
+
+function startKeepAlive() {
+  try {
+    chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.5 });
+  } catch (e) { /* chrome.alarms indispo en test */ }
+  if (!keepAliveIntervalId) {
+    keepAliveIntervalId = setInterval(() => {
+      try { chrome.runtime.getPlatformInfo().catch(() => { }); } catch (e) { }
+    }, 20_000);
+  }
+  Logger.debug(LOG_SRC, 'Keepalive SW démarré');
+}
+
+function stopKeepAlive() {
+  try { chrome.alarms.clear(KEEPALIVE_ALARM); } catch (e) { }
+  if (keepAliveIntervalId) {
+    clearInterval(keepAliveIntervalId);
+    keepAliveIntervalId = null;
+  }
+  Logger.debug(LOG_SRC, 'Keepalive SW arrêté');
+}
+
+// Décode une chaîne base64 en Uint8Array en une seule passe.
+function base64ToUint8Array(base64) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
 
 // Préfixes d'URLs où les content scripts ne peuvent PAS être injectés
 const RESTRICTED_URL_PATTERNS = [
@@ -98,6 +143,35 @@ async function loadPersistedState() {
     }
   } catch (e) {
     Logger.error(LOG_SRC, 'Erreur chargement état persisté', { error: e.message });
+  }
+}
+
+// Au démarrage du SW, détecter une requête fetch interrompue par la suspension du SW.
+async function checkInflightOrphan() {
+  try {
+    const result = await getSessionStorage().get([INFLIGHT_STORAGE_KEY]);
+    const inflight = result[INFLIGHT_STORAGE_KEY];
+    if (!inflight) return;
+
+    const elapsedSec = Math.round((Date.now() - inflight.startedAt) / 1000);
+    Logger.warn(LOG_SRC, 'Requête in-flight détectée au démarrage du SW (probable suspension)', {
+      ...inflight,
+      elapsedSec
+    });
+    await getSessionStorage().remove(INFLIGHT_STORAGE_KEY);
+
+    if (inflight.tabId) {
+      try {
+        await chrome.tabs.sendMessage(inflight.tabId, {
+          action: 'show-error',
+          message: `Transcription perdue (extension redémarrée après ${elapsedSec}s). Réessaie ton enregistrement.`
+        });
+      } catch (e) { /* onglet fermé */ }
+    }
+    updateBadge('error');
+    setTimeout(() => updateBadge('idle'), 5000);
+  } catch (e) {
+    Logger.error(LOG_SRC, 'Erreur check inflight orphan', { error: e.message });
   }
 }
 
@@ -164,6 +238,9 @@ Logger.info(LOG_SRC, 'Service worker démarré', {
 
 // Charger état persistant (recouvrement après restart SW)
 loadPersistedState();
+
+// Détecter une requête fetch interrompue par une suspension du SW
+checkInflightOrphan();
 
 // ---------- Écoutes ----------
 
@@ -416,6 +493,9 @@ async function processAudio(audioBase64, tabId) {
     tabId
   });
 
+  let keepAliveStarted = false;
+  let inflightPersisted = false;
+
   try {
     updateBadge('processing');
 
@@ -453,20 +533,64 @@ async function processAudio(audioBase64, tabId) {
       throw new Error('URL du webhook non configurée');
     }
 
+    // Décoder le base64 en bytes une seule fois, puis emballer en multipart.
+    // Évite JSON.stringify d'un gros base64 (+33% taille) et permet à n8n
+    // de consommer directement le fichier binaire.
+    const mp3Bytes = base64ToUint8Array(audioBase64);
+    const audioSizeKB = Math.round(mp3Bytes.byteLength / 1024);
+    const mp3Blob = new Blob([mp3Bytes], { type: 'audio/mpeg' });
+
+    const formData = new FormData();
+    formData.append('audio', mp3Blob, 'recording.mp3');
+    formData.append('timestamp', new Date().toISOString());
+
+    // Persister l'état in-flight pour détecter les SW killés pendant l'upload.
+    const inflight = {
+      tabId,
+      startedAt: Date.now(),
+      audioSizeKB,
+      url: config.webhookUrl
+    };
+    await getSessionStorage().set({ [INFLIGHT_STORAGE_KEY]: inflight });
+    inflightPersisted = true;
+
+    // Démarrer le keepalive AVANT le fetch — sinon le SW peut être suspendu
+    // pendant l'upload/traitement (les promesses pendantes ne comptent pas comme activité).
+    startKeepAlive();
+    keepAliveStarted = true;
+
+    // Authentification optionnelle (FormData gère le Content-Type lui-même).
+    const headers = {};
+    if (config.authUsername && config.authPassword) {
+      headers['Authorization'] = `Basic ${btoa(`${config.authUsername}:${config.authPassword}`)}`;
+    }
+
     Logger.info(LOG_SRC, 'Envoi vers webhook...', {
       url: config.webhookUrl.substring(0, 50) + '...',
-      audioSizeKB: Math.round(audioBase64.length / 1024)
+      audioSizeKB,
+      timeoutMs: WEBHOOK_TIMEOUT_MS
     });
 
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), WEBHOOK_TIMEOUT_MS);
+
+    let response;
     const startTime = Date.now();
-    const response = await fetch(config.webhookUrl, {
-      method: 'POST',
-      headers: buildHeaders(config.authUsername, config.authPassword),
-      body: JSON.stringify({
-        audio: audioBase64,
-        timestamp: new Date().toISOString()
-      })
-    });
+    try {
+      response = await fetch(config.webhookUrl, {
+        method: 'POST',
+        headers,
+        body: formData,
+        signal: controller.signal
+      });
+    } catch (fetchError) {
+      if (fetchError.name === 'AbortError') {
+        throw new Error(`Timeout webhook (${WEBHOOK_TIMEOUT_MS / 1000}s) — le serveur n'a pas répondu à temps`);
+      }
+      throw fetchError;
+    } finally {
+      clearTimeout(timeoutId);
+    }
 
     const responseTime = Date.now() - startTime;
     Logger.info(LOG_SRC, 'Réponse webhook reçue', {
@@ -499,7 +623,7 @@ async function processAudio(audioBase64, tabId) {
       text: cleanedText,
       tabId,
       processingTimeMs: responseTime,
-      audioSizeKB: Math.round(audioBase64.length / 1024)
+      audioSizeKB
     });
 
     injectTextOrNotify(tabId, cleanedText);
@@ -519,6 +643,13 @@ async function processAudio(audioBase64, tabId) {
     }
     updateBadge('error');
     setTimeout(() => updateBadge('idle'), 3000);
+  } finally {
+    if (keepAliveStarted) stopKeepAlive();
+    if (inflightPersisted) {
+      try {
+        await getSessionStorage().remove(INFLIGHT_STORAGE_KEY);
+      } catch (e) { /* non critique */ }
+    }
   }
 }
 
