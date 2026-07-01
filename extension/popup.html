@@ -40,6 +40,22 @@
         <h2>Configuration</h2>
 
         <div class="form-group">
+          <label>Mode de traitement</label>
+          <div class="mode-selector" role="radiogroup" aria-label="Mode de traitement">
+            <label class="mode-option">
+              <input type="radio" name="mode" value="prompt" checked>
+              <span class="mode-title">Prompt</span>
+              <span class="hint">Transcription réécrite en prompt clair et structuré</span>
+            </label>
+            <label class="mode-option">
+              <input type="radio" name="mode" value="transcript">
+              <span class="mode-title">Transcript</span>
+              <span class="hint">Transcription fidèle, nettoyée légèrement (ponctuation, tics), sans réécriture</span>
+            </label>
+          </div>
+        </div>
+
+        <div class="form-group">
           <label for="webhookUrl">URL du Webhook n8n</label>
           <input type="url" id="webhookUrl" placeholder="https://votre-n8n.com/webhook/...">
         </div>
