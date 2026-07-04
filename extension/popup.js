@@ -33,7 +33,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Charger la configuration depuis le storage
   function loadConfig() {
-    chrome.storage.sync.get(['webhookUrl', 'authUsername', 'authPassword', 'minDuration', 'hotkey', 'testMode'], (result) => {
+    chrome.storage.sync.get(['webhookUrl', 'authUsername', 'authPassword', 'minDuration', 'hotkey', 'testMode', 'mode'], (result) => {
+      const mode = result.mode === 'transcript' ? 'transcript' : 'prompt';
+      const modeRadio = document.querySelector(`input[name="mode"][value="${mode}"]`);
+      if (modeRadio) {
+        modeRadio.checked = true;
+      }
       if (result.webhookUrl) {
         webhookUrlInput.value = result.webhookUrl;
       }
@@ -62,6 +67,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const authPassword = authPasswordInput.value;
     const minDuration = parseFloat(minDurationInput.value) || 1;
     const testMode = testModeInput.checked;
+    const selectedMode = document.querySelector('input[name="mode"]:checked');
+    const mode = selectedMode && selectedMode.value === 'transcript' ? 'transcript' : 'prompt';
 
     // En mode test, l'URL du webhook est optionnelle
     if (!webhookUrl && !testMode) {
@@ -84,7 +91,8 @@ document.addEventListener('DOMContentLoaded', () => {
       authUsername: authUsername,
       authPassword: authPassword,
       minDuration: minDuration,
-      testMode: testMode
+      testMode: testMode,
+      mode: mode
     }, () => {
       saveBtn.textContent = 'Sauvegardé!';
       saveBtn.classList.add('saved');

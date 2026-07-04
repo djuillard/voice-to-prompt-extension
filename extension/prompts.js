@@ -41,6 +41,7 @@ function displayPrompts(prompts, showFullText = false) {
   prompts.forEach(prompt => {
     const date = new Date(prompt.timestamp);
     const isTest = prompt.isTest || false;
+    const modeLabel = prompt.mode === 'transcript' ? 'Transcript' : 'Prompt';
     const entry = document.createElement('div');
     entry.className = 'prompt-entry';
     entry.dataset.id = prompt.id;
@@ -59,6 +60,7 @@ function displayPrompts(prompts, showFullText = false) {
           `<button class="see-more-btn" data-id="${prompt.id}">Voir tout</button>` : ''}
       </div>
       <div class="prompt-meta">
+        <span class="meta-item">🎛 ${modeLabel}</span>
         <span class="meta-item">⏱ ${prompt.processingTimeMs}ms</span>
         <span class="meta-item">📦 ${prompt.audioSizeKB}KB</span>
         <span class="meta-item">📝 ${prompt.length} car.</span>
@@ -159,6 +161,7 @@ async function exportToTxt() {
 
     content += `Métadonnées:\n`;
     content += `  • Date: ${date.toLocaleString('fr-FR')}\n`;
+    content += `  • Mode: ${prompt.mode === 'transcript' ? 'Transcript' : 'Prompt'}\n`;
     content += `  • Durée traitement: ${prompt.processingTimeMs}ms\n`;
     content += `  • Taille audio: ${prompt.audioSizeKB}KB\n`;
     if (prompt.isTest) {

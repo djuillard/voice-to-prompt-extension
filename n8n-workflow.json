@@ -58,7 +58,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Recuperer l'audio depuis le webhook.\n// L'extension >= 1.3.0 envoie en multipart/form-data (champ \"audio\").\n// Les versions anterieures envoyaient un JSON base64 (champ body.audio).\nconst input = $input.first();\nlet audioBuffer;\nlet timestamp;\n\nif (input.binary && input.binary.audio) {\n  // Multipart : n8n a deja attache le fichier sous binary.audio\n  audioBuffer = await this.helpers.getBinaryDataBuffer(0, 'audio');\n  timestamp = input.json.body && input.json.body.timestamp\n    ? input.json.body.timestamp\n    : new Date().toISOString();\n} else if (input.json.body && input.json.body.audio) {\n  // Legacy : base64 dans le JSON\n  audioBuffer = Buffer.from(input.json.body.audio, 'base64');\n  timestamp = input.json.body.timestamp || new Date().toISOString();\n} else {\n  throw new Error('Aucune donnee audio recue (ni binary.audio ni body.audio)');\n}\n\nreturn [{\n  json: {\n    timestamp,\n    audioSizeKB: Math.round(audioBuffer.length / 1024)\n  },\n  binary: {\n    data: await this.helpers.prepareBinaryData(\n      audioBuffer,\n      'recording.mp3',\n      'audio/mpeg'\n    )\n  }\n}];"
+        "jsCode": "// Recuperer l'audio depuis le webhook.\n// L'extension >= 1.3.0 envoie en multipart/form-data (champ \"audio\").\n// Les versions anterieures envoyaient un JSON base64 (champ body.audio).\nconst input = $input.first();\nlet audioBuffer;\nlet timestamp;\nlet mode;\n\nif (input.binary && input.binary.audio) {\n  // Multipart : n8n a deja attache le fichier sous binary.audio\n  audioBuffer = await this.helpers.getBinaryDataBuffer(0, 'audio');\n  timestamp = input.json.body && input.json.body.timestamp\n    ? input.json.body.timestamp\n    : new Date().toISOString();\n  mode = input.json.body && input.json.body.mode;\n} else if (input.json.body && input.json.body.audio) {\n  // Legacy : base64 dans le JSON\n  audioBuffer = Buffer.from(input.json.body.audio, 'base64');\n  timestamp = input.json.body.timestamp || new Date().toISOString();\n  mode = input.json.body.mode;\n} else {\n  throw new Error('Aucune donnee audio recue (ni binary.audio ni body.audio)');\n}\n\n// Mode de traitement : 'prompt' (reecriture) ou 'transcript' (nettoyage leger).\n// Defaut retro-compatible : 'prompt'.\nmode = mode === 'transcript' ? 'transcript' : 'prompt';\n\nreturn [{\n  json: {\n    timestamp,\n    mode,\n    audioSizeKB: Math.round(audioBuffer.length / 1024)\n  },\n  binary: {\n    data: await this.helpers.prepareBinaryData(\n      audioBuffer,\n      'recording.mp3',\n      'audio/mpeg'\n    )\n  }\n}];"
       },
       "id": "a1b2c3d4-prepare",
       "name": "Prepare Audio",
@@ -119,6 +119,69 @@
     },
     {
       "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "mode-check",
+              "leftValue": "={{ $('Prepare Audio').first().json.mode }}",
+              "rightValue": "transcript",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-if-mode",
+      "name": "Switch by Mode",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1130, 420],
+      "notesInFlow": true,
+      "notes": "Aiguillage prompt vs transcript"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.mistral.ai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.MISTRAL_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"mistral-small-latest\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"Tu es un assistant qui nettoie LEGEREMENT des transcriptions vocales. Regles STRICTES : corrige uniquement la ponctuation, les majuscules et l'orthographe evidente ; retire les hesitations et tics de langage (euh, hum, ben, voila, du coup) ainsi que les repetitions involontaires. NE reformule PAS, NE restructure PAS, NE resume PAS : conserve exactement les memes mots, le meme ordre et le meme ton que l'original. Reponds uniquement avec le texte nettoye, sans commentaires ni explications.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": {{ JSON.stringify(\"Voici la transcription a nettoyer : \" + $json.text) }}\n    }\n  ],\n  \"temperature\": 0.1,\n  \"max_tokens\": 2000\n}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "a1b2c3d4-light-cleanup",
+      "name": "Mistral Light Cleanup",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1350, 240],
+      "notesInFlow": true,
+      "notes": "Nettoyage leger (mode transcript)"
+    },
+    {
+      "parameters": {
         "method": "POST",
         "url": "https://api.mistral.ai/v1/chat/completions",
         "sendHeaders": true,
@@ -145,19 +208,19 @@
       "name": "Mistral Cleanup",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [1130, 420],
+      "position": [1350, 420],
       "notesInFlow": true,
-      "notes": "Nettoyage du texte transcrit"
+      "notes": "Reecriture en prompt (mode prompt)"
     },
     {
       "parameters": {
-        "jsCode": "// Extraire le texte nettoye de la reponse Mistral\nconst response = $input.first().json;\n\nlet cleanedText = '';\n\nif (response.choices && response.choices[0] && response.choices[0].message) {\n  cleanedText = response.choices[0].message.content;\n} else {\n  throw new Error('Format de reponse Mistral inattendu: ' + JSON.stringify(response));\n}\n\n// Nettoyer le texte\ncleanedText = cleanedText.trim();\n\n// Recuperer le texte original\nconst originalText = $('Check STT Result').first().json.text || '';\n\nreturn [{\n  json: {\n    cleanedText: cleanedText,\n    originalText: originalText,\n    timestamp: new Date().toISOString()\n  }\n}];"
+        "jsCode": "// Extraire le texte nettoye de la reponse Mistral\nconst response = $input.first().json;\n\nlet cleanedText = '';\n\nif (response.choices && response.choices[0] && response.choices[0].message) {\n  cleanedText = response.choices[0].message.content;\n} else {\n  throw new Error('Format de reponse Mistral inattendu: ' + JSON.stringify(response));\n}\n\n// Nettoyer le texte\ncleanedText = cleanedText.trim();\n\n// Recuperer le texte original et le mode de traitement\nconst originalText = $('Check STT Result').first().json.text || '';\nconst mode = $('Prepare Audio').first().json.mode || 'prompt';\n\nreturn [{\n  json: {\n    cleanedText: cleanedText,\n    originalText: originalText,\n    mode: mode,\n    timestamp: new Date().toISOString()\n  }\n}];"
       },
       "id": "a1b2c3d4-format",
       "name": "Format Response",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1350, 420]
+      "position": [1570, 340]
     },
     {
       "parameters": {
@@ -169,7 +232,7 @@
       "name": "Respond Success",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
-      "position": [1570, 420]
+      "position": [1790, 340]
     }
   ],
   "connections": {
@@ -228,7 +291,36 @@
       "main": [
         [
           {
+            "node": "Switch by Mode",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch by Mode": {
+      "main": [
+        [
+          {
+            "node": "Mistral Light Cleanup",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
             "node": "Mistral Cleanup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mistral Light Cleanup": {
+      "main": [
+        [
+          {
+            "node": "Format Response",
             "type": "main",
             "index": 0
           }

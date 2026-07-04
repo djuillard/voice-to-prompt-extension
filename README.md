@@ -8,6 +8,9 @@ Extension Chrome qui capture votre voix et l'envoie a un workflow n8n pour trans
 - **Hotkey configurable** : Ctrl+Shift+V par defaut
 - **Feedback visuel** : Badge sur l'icone (rouge = enregistrement, orange = traitement)
 - **Transcription IA** : Utilise Mistral AI pour la transcription
+- **Deux modes de traitement** :
+  - **Prompt** (defaut) : la transcription est reecrite en prompt clair et structure
+  - **Transcript** : transcription fidele, nettoyee legerement (ponctuation, tics), sans reecriture
 - **Nettoyage automatique** : Supprime les hesitations et structure le texte
 - **Injection automatique** : Le texte nettoye est insere dans le champ actif
 
@@ -107,20 +110,33 @@ Voice_to_text_ext/
 ```
 Webhook → Is Test? → [Test OK]
               ↓
-        Prepare Audio → Mistral STT → Check Result → Mistral Cleanup → Format → Response
+        Prepare Audio → Mistral STT → Check Result → Switch by Mode ┬─[transcript]→ Mistral Light Cleanup ─┐
+                                                                     └─[prompt]────→ Mistral Cleanup ───────┴→ Format → Response
 ```
 
-1. **Webhook** : Recoit l'audio en base64
-2. **Prepare Audio** : Convertit en format binaire pour l'API
+1. **Webhook** : Recoit l'audio (multipart) + le champ `mode` (`prompt` ou `transcript`)
+2. **Prepare Audio** : Convertit en format binaire pour l'API et lit le `mode`
 3. **Mistral STT** : Transcription avec Voxtral
-4. **Mistral Cleanup** : Nettoyage avec mistral-small-latest
-5. **Response** : Retourne le texte nettoye en JSON
+4. **Switch by Mode** : Aiguille selon le `mode` demande par l'extension
+5. **Mistral Cleanup / Mistral Light Cleanup** : Reecriture en prompt, ou nettoyage leger
+6. **Response** : Retourne le texte (`cleanedText`) et le `mode` en JSON
 
-### Prompt de nettoyage
+> Le champ `mode` est retro-compatible : une requete sans `mode` est traitee comme `prompt`.
 
-Le prompt systeme pour le nettoyage est :
+### Choix du mode
+
+Le mode se selectionne dans la popup de l'extension (**Mode de traitement : Prompt / Transcript**).
+Il est memorise et applique a chaque enregistrement jusqu'a modification.
+
+### Prompts de nettoyage
+
+**Mode Prompt** (reecriture) :
 
 > Tu es un assistant qui transforme des transcriptions orales en prompts ecrits professionnels. Regles : retire les hesitations, repetitions, et tics de langage. Structure en phrases claires. Conserve l'intention et le ton. Ajoute une ponctuation appropriee. Ne change pas le fond, optimise la forme. Reponds uniquement avec le texte nettoye, sans commentaires ni explications.
+
+**Mode Transcript** (nettoyage leger) :
+
+> Tu es un assistant qui nettoie LEGEREMENT des transcriptions vocales. Regles STRICTES : corrige uniquement la ponctuation, les majuscules et l'orthographe evidente ; retire les hesitations et tics de langage (euh, hum, ben, voila, du coup) ainsi que les repetitions involontaires. NE reformule PAS, NE restructure PAS, NE resume PAS : conserve exactement les memes mots, le meme ordre et le meme ton que l'original. Reponds uniquement avec le texte nettoye, sans commentaires ni explications.
 
 ## Depannage
 

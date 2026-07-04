@@ -247,6 +247,62 @@ describe('Background Script - Recording State Management', () => {
     });
   });
 
+  describe('Mode de traitement (prompt / transcript)', () => {
+    it('devrait normaliser un mode inconnu vers "prompt"', () => {
+      const { normalizeMode } = global._backgroundModule;
+      expect(normalizeMode('prompt')).toBe('prompt');
+      expect(normalizeMode('transcript')).toBe('transcript');
+      expect(normalizeMode(undefined)).toBe('prompt');
+      expect(normalizeMode('n_importe_quoi')).toBe('prompt');
+    });
+
+    it('devrait envoyer le mode "prompt" par défaut au webhook', async () => {
+      let sentFormData;
+      global.fetch = jest.fn((url, opts) => {
+        sentFormData = opts.body;
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ cleanedText: 'ok' }) });
+      });
+
+      await processAudio('dGVzdA==', 1);
+
+      expect(sentFormData).toBeInstanceOf(FormData);
+      expect(sentFormData.get('mode')).toBe('prompt');
+    });
+
+    it('devrait envoyer le mode "transcript" quand il est configuré', async () => {
+      chrome.storage.sync.get.mockResolvedValue({
+        webhookUrl: 'https://test-n8n.com/webhook',
+        mode: 'transcript'
+      });
+      let sentFormData;
+      global.fetch = jest.fn((url, opts) => {
+        sentFormData = opts.body;
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ cleanedText: 'ok' }) });
+      });
+
+      await processAudio('dGVzdA==', 1);
+
+      expect(sentFormData.get('mode')).toBe('transcript');
+    });
+
+    it('devrait enregistrer le mode dans l\'historique des prompts', async () => {
+      chrome.storage.sync.get.mockResolvedValue({
+        webhookUrl: 'https://test-n8n.com/webhook',
+        mode: 'transcript'
+      });
+      chrome.storage.local.get.mockResolvedValue({ vtt_prompts_history: [] });
+      chrome.storage.local.set.mockClear();
+
+      await processAudio('dGVzdA==', 1);
+
+      const historyCall = chrome.storage.local.set.mock.calls.find(
+        c => c[0] && c[0].vtt_prompts_history
+      );
+      expect(historyCall).toBeDefined();
+      expect(historyCall[0].vtt_prompts_history[0].mode).toBe('transcript');
+    });
+  });
+
   describe('BuildHeaders', () => {
     it('devrait retourner Content-Type par défaut', () => {
       const headers = buildHeaders();

@@ -35,8 +35,19 @@ const DEFAULT_CONFIG = {
   webhookUrl: '',
   hotkey: 'Ctrl+Shift+V',
   minDuration: 1,
-  testMode: false
+  testMode: false,
+  // Mode de traitement :
+  //  - 'prompt'     : transcription + réécriture en prompt professionnel (défaut)
+  //  - 'transcript' : transcription + nettoyage léger (ponctuation, tics), sans réécriture
+  mode: 'prompt'
 };
+
+// Modes de traitement supportés (envoyés au workflow n8n)
+const PROCESSING_MODES = ['prompt', 'transcript'];
+
+function normalizeMode(mode) {
+  return PROCESSING_MODES.includes(mode) ? mode : 'prompt';
+}
 
 // Constantes
 const PROMPTS_STORAGE_KEY = 'vtt_prompts_history';
@@ -503,25 +514,29 @@ async function processAudio(audioBase64, tabId) {
       throw new Error('Audio vide reçu');
     }
 
-    const config = await chrome.storage.sync.get(['webhookUrl', 'authUsername', 'authPassword', 'testMode']);
+    const config = await chrome.storage.sync.get(['webhookUrl', 'authUsername', 'authPassword', 'testMode', 'mode']);
+    const mode = normalizeMode(config.mode);
     Logger.debug(LOG_SRC, 'Config récupérée pour envoi', {
       hasWebhook: !!config.webhookUrl,
       hasAuth: !!(config.authUsername && config.authPassword),
-      testMode: !!config.testMode
+      testMode: !!config.testMode,
+      mode
     });
 
     // Mode test : simuler une transcription
     if (config.testMode) {
-      Logger.info(LOG_SRC, 'Mode test activé, simulation de transcription');
+      Logger.info(LOG_SRC, 'Mode test activé, simulation de transcription', { mode });
       await new Promise(resolve => setTimeout(resolve, 1000));
 
-      const testText = `[Mode Test] Audio enregistré (${Math.round(audioBase64.length / 1024)}KB). Ceci est un texte de test pour vérifier que l'enregistrement fonctionne correctement.`;
+      const modeLabel = mode === 'transcript' ? 'Transcription' : 'Prompt';
+      const testText = `[Mode Test - ${modeLabel}] Audio enregistré (${Math.round(audioBase64.length / 1024)}KB). Ceci est un texte de test pour vérifier que l'enregistrement fonctionne correctement.`;
 
       await savePromptToHistory({
         text: testText,
         tabId,
         processingTimeMs: 1000,
         audioSizeKB: Math.round(audioBase64.length / 1024),
+        mode,
         isTest: true
       });
 
@@ -543,6 +558,8 @@ async function processAudio(audioBase64, tabId) {
     const formData = new FormData();
     formData.append('audio', mp3Blob, 'recording.mp3');
     formData.append('timestamp', new Date().toISOString());
+    // Indique au workflow n8n s'il doit réécrire en prompt ou seulement nettoyer légèrement.
+    formData.append('mode', mode);
 
     // Persister l'état in-flight pour détecter les SW killés pendant l'upload.
     const inflight = {
@@ -623,7 +640,8 @@ async function processAudio(audioBase64, tabId) {
       text: cleanedText,
       tabId,
       processingTimeMs: responseTime,
-      audioSizeKB
+      audioSizeKB,
+      mode
     });
 
     injectTextOrNotify(tabId, cleanedText);
@@ -757,6 +775,7 @@ if (typeof module !== 'undefined' && module.exports) {
     isRestrictedUrl,
     savePromptToHistory,
     resetState,
+    normalizeMode,
     _state: state
   };
 }
