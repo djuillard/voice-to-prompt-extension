@@ -145,6 +145,19 @@ Il est memorise et applique a chaque enregistrement jusqu'a modification.
 - Verifiez que le site a l'autorisation d'acceder au microphone
 - Chrome doit demander l'autorisation au premier usage
 
+### Badge "!" rouge au demarrage de l'enregistrement
+
+Depuis la 1.4.1, le service worker **injecte automatiquement** le content script
+dans l'onglet actif s'il est absent (cas typique d'un onglet ouvert avant le
+rechargement de l'extension). Un F5 manuel n'est donc plus necessaire dans la
+plupart des cas. Si le badge "!" persiste :
+
+- La page est peut-etre **restreinte** (`chrome://`, Chrome Web Store, PDF,
+  `file://`, `about:blank`) : l'injection y est interdite par Chrome. Testez sur
+  une page `https://` normale.
+- Le **micro** est bloque : reautorisez-le via l'icone a gauche de l'URL, puis F5.
+- Consultez **"Voir les logs"** : le message d'erreur exact y est enregistre.
+
 ### Erreur de connexion au webhook
 
 - Verifiez que n8n est lance et le workflow active

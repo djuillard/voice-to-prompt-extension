@@ -78,6 +78,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   ContentLogger.debug(`Message reçu: ${message.action}`);
 
   switch (message.action) {
+    case 'ping':
+      // Sonde du background pour vérifier que le content script est vivant.
+      sendResponse({ pong: true });
+      break;
+
     case 'start-recording':
       // Mettre à jour la durée minimum si fournie
       if (message.minDuration !== undefined) {

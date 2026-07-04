@@ -32,6 +32,12 @@ describe('Background Script - Recording State Management', () => {
         query: jest.fn(() => Promise.resolve([{ id: 1, url: 'https://example.com' }])),
         sendMessage: jest.fn(() => Promise.resolve())
       },
+      scripting: {
+        executeScript: jest.fn(() => Promise.resolve([{ result: true }]))
+      },
+      notifications: {
+        create: jest.fn(() => Promise.resolve('notif-id'))
+      },
       commands: {
         onCommand: {
           addListener: jest.fn()
@@ -244,6 +250,76 @@ describe('Background Script - Recording State Management', () => {
       expect(chrome.action.setBadgeText).toHaveBeenCalledWith({ text: '!' });
       expect(chrome.action.setBadgeBackgroundColor).toHaveBeenCalledWith({ color: '#FF0000' });
       jest.advanceTimersByTime(3000);
+    });
+  });
+
+  describe('Fiabilité - Injection du content script', () => {
+    it('ne devrait PAS réinjecter si le content script répond déjà (ping OK)', async () => {
+      const { ensureContentScript } = global._backgroundModule;
+      chrome.tabs.sendMessage.mockResolvedValue({ pong: true });
+
+      const ok = await ensureContentScript(1);
+
+      expect(ok).toBe(true);
+      expect(chrome.scripting.executeScript).not.toHaveBeenCalled();
+    });
+
+    it('devrait injecter le content script si le ping échoue', async () => {
+      const { ensureContentScript } = global._backgroundModule;
+      // 1er ping rejette (absent), injection OK, 2e ping résout (présent)
+      chrome.tabs.sendMessage
+        .mockRejectedValueOnce(new Error('Receiving end does not exist'))
+        .mockResolvedValueOnce({ pong: true });
+
+      const ok = await ensureContentScript(1);
+
+      expect(ok).toBe(true);
+      expect(chrome.scripting.executeScript).toHaveBeenCalledWith(
+        expect.objectContaining({
+          target: { tabId: 1 },
+          files: ['lame.min.js', 'content.js']
+        })
+      );
+    });
+
+    it('devrait retourner false si l\'injection échoue', async () => {
+      const { ensureContentScript } = global._backgroundModule;
+      chrome.tabs.sendMessage.mockRejectedValue(new Error('no receiver'));
+      chrome.scripting.executeScript.mockRejectedValueOnce(new Error('Cannot access page'));
+
+      const ok = await ensureContentScript(1);
+
+      expect(ok).toBe(false);
+    });
+
+    it('devrait auto-injecter avant de démarrer sur un onglet déjà ouvert', async () => {
+      // start-recording rejette une 1re fois (pas de content script), puis tout passe
+      chrome.tabs.sendMessage
+        .mockRejectedValueOnce(new Error('Receiving end does not exist')) // ping initial
+        .mockResolvedValue({ success: true }); // ping post-injection + start-recording
+
+      await toggleRecording();
+
+      expect(chrome.scripting.executeScript).toHaveBeenCalled();
+      expect(chrome.tabs.sendMessage).toHaveBeenCalledWith(
+        1,
+        expect.objectContaining({ action: 'start-recording' })
+      );
+    });
+
+    it('devrait notifier et NE PAS démarrer si le content script reste injoignable', async () => {
+      chrome.tabs.sendMessage.mockRejectedValue(new Error('no receiver'));
+      chrome.scripting.executeScript.mockRejectedValue(new Error('Cannot access page'));
+
+      await toggleRecording();
+
+      expect(chrome.tabs.sendMessage).not.toHaveBeenCalledWith(
+        1,
+        expect.objectContaining({ action: 'start-recording' })
+      );
+      // Fallback notification système puisque le content script est injoignable
+      expect(chrome.notifications.create).toHaveBeenCalled();
+      expect(chrome.action.setBadgeText).toHaveBeenCalledWith({ text: '!' });
     });
   });
 
@@ -556,18 +632,19 @@ describe('Background Script - Recording State Management', () => {
 
   describe('Fiabilité - Lock anti-concurrence', () => {
     it('devrait ignorer un second toggleRecording pendant qu\'un premier est en cours', async () => {
-      // Simuler un délai dans la réponse de sendMessage
+      // Le ping (ensureContentScript) répond tout de suite ; c'est start-recording
+      // qui reste en attente pour simuler un premier toggle « en cours ».
       let resolveFirst;
-      chrome.tabs.sendMessage.mockImplementation(() => new Promise((resolve) => {
-        resolveFirst = resolve;
-      }));
+      chrome.tabs.sendMessage.mockImplementation((tabId, msg) => {
+        if (msg && msg.action === 'ping') return Promise.resolve({ pong: true });
+        return new Promise((resolve) => { resolveFirst = resolve; });
+      });
 
       const p1 = toggleRecording();
       const p2 = toggleRecording(); // Devrait être ignoré (lock actif)
 
-      // Laisser l'event loop avancer
-      await Promise.resolve();
-      await Promise.resolve();
+      // Laisser l'event loop avancer (plusieurs awaits: query, config, ping, ...)
+      for (let i = 0; i < 15; i++) await Promise.resolve();
 
       // Un seul sendMessage de type start-recording envoyé
       const startCalls = chrome.tabs.sendMessage.mock.calls.filter(
@@ -575,7 +652,7 @@ describe('Background Script - Recording State Management', () => {
       );
       expect(startCalls.length).toBe(1);
 
-      resolveFirst({ success: true });
+      resolveFirst && resolveFirst({ success: true });
       await p1;
       await p2;
     });

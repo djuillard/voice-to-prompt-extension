@@ -369,6 +369,79 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 // ---------- Logique principale ----------
 
+// Notifie l'utilisateur d'une erreur, même si le content script est injoignable.
+// Essaie d'abord une notification in-page (content script), puis retombe sur
+// chrome.notifications (toast système) pour ne jamais échouer en silence.
+async function notifyUser(tabId, message) {
+  let delivered = false;
+  if (tabId) {
+    try {
+      await chrome.tabs.sendMessage(tabId, { action: 'show-error', message });
+      delivered = true;
+    } catch (e) {
+      // Content script indisponible: fallback ci-dessous
+    }
+  }
+  if (!delivered) {
+    try {
+      await chrome.notifications?.create?.({
+        type: 'basic',
+        iconUrl: 'icons/icon48.png',
+        title: 'Voice to Text',
+        message
+      });
+    } catch (e) { /* chrome.notifications indispo (tests) */ }
+  }
+}
+
+// S'assure que le content script répond dans l'onglet.
+// Après un rechargement/màj de l'extension, les onglets DÉJÀ ouverts n'ont plus
+// de content script actif: on l'injecte alors à la volée (permission "scripting"),
+// ce qui évite d'exiger un F5 manuel de la page.
+async function ensureContentScript(tabId) {
+  // 1) Le content script est-il déjà là ? Un onglet SANS content script fait
+  //    rejeter sendMessage ("Receiving end does not exist") ; s'il résout, le
+  //    script est présent (peu importe la forme de la réponse).
+  try {
+    await chrome.tabs.sendMessage(tabId, { action: 'ping' });
+    Logger.debug(LOG_SRC, 'Content script déjà présent', { tabId });
+    return true;
+  } catch (e) {
+    Logger.debug(LOG_SRC, 'Content script absent, injection à la volée', { tabId });
+  }
+
+  // 2) Injection programmatique (lamejs AVANT content.js, comme dans le manifest)
+  if (!chrome.scripting || !chrome.scripting.executeScript) {
+    Logger.error(LOG_SRC, 'chrome.scripting indisponible, injection impossible', { tabId });
+    return false;
+  }
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ['lame.min.js', 'content.js']
+    });
+    Logger.info(LOG_SRC, 'Content script injecté à la volée', { tabId });
+  } catch (injectErr) {
+    Logger.error(LOG_SRC, 'Échec injection content script', {
+      tabId,
+      error: injectErr.message
+    });
+    return false;
+  }
+
+  // 3) Confirmer que le script fraîchement injecté répond
+  try {
+    await chrome.tabs.sendMessage(tabId, { action: 'ping' });
+    return true;
+  } catch (e) {
+    Logger.error(LOG_SRC, 'Content script injecté mais sans réponse', {
+      tabId,
+      error: e.message
+    });
+    return false;
+  }
+}
+
 async function toggleRecording() {
   Logger.info(LOG_SRC, 'toggleRecording appelé', snapshot());
 
@@ -454,6 +527,19 @@ async function toggleRecording() {
       const minDuration = config.minDuration !== undefined ? config.minDuration : DEFAULT_CONFIG.minDuration;
       Logger.info(LOG_SRC, 'Démarrage enregistrement demandé', { tabId: tab.id, minDuration });
 
+      // S'assurer que le content script est présent (l'injecter si l'onglet
+      // était ouvert avant le rechargement de l'extension).
+      const ready = await ensureContentScript(tab.id);
+      if (!ready) {
+        Logger.error(LOG_SRC, 'Content script indisponible, démarrage annulé', { tabId: tab.id });
+        await notifyUser(
+          tab.id,
+          "Impossible d'activer l'enregistrement sur cet onglet. Recharge la page (F5) puis réessaie."
+        );
+        await resetState('error');
+        return;
+      }
+
       try {
         await chrome.tabs.sendMessage(tab.id, {
           action: 'start-recording',
@@ -468,6 +554,10 @@ async function toggleRecording() {
         state.watchdogTimer = setTimeout(async () => {
           if (!state.isRecording) {
             Logger.warn(LOG_SRC, 'Aucun ack recording-started reçu, reset');
+            await notifyUser(
+              tab.id,
+              "L'enregistrement n'a pas démarré (micro bloqué ou page non prête ?). Réessaie."
+            );
             await resetState('error');
           }
           state.watchdogTimer = null;
@@ -477,6 +567,7 @@ async function toggleRecording() {
           error: error.message,
           tabId: tab.id
         });
+        await notifyUser(tab.id, `Impossible de démarrer l'enregistrement: ${error.message}`);
         await resetState('error');
       }
     }
@@ -776,6 +867,8 @@ if (typeof module !== 'undefined' && module.exports) {
     savePromptToHistory,
     resetState,
     normalizeMode,
+    ensureContentScript,
+    notifyUser,
     _state: state
   };
 }
